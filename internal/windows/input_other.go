@@ -55,6 +55,9 @@ func (w *HotkeyWatcher) Captured() <-chan Captured { return nil }
 // Close is a no-op off Windows.
 func (w *HotkeyWatcher) Close() error { return nil }
 
+// Method reports the mechanism off Windows.
+func (w *HotkeyWatcher) Method() string { return "stub" }
+
 // ForegroundWindow is always 0 off Windows.
 func ForegroundWindow() uintptr { return 0 }
 

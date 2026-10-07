@@ -3,9 +3,12 @@
 package windows
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 )
@@ -64,6 +67,37 @@ func TestInjectTextAccepted(t *testing.T) {
 	}
 	if err := InjectText(0, "sx"); err != nil {
 		t.Fatalf("InjectText: %v", err)
+	}
+}
+
+// TestKeyWatcherConsumesEscape proves the pill's Esc dismiss is actually consumed, not merely
+// observed. StartKeyWatcher prefers RegisterHotKey because the system swallows a registered hotkey
+// outright; a second registration of the same key must therefore be refused, which is what this
+// asserts. Opt-in because it grabs Esc globally for the moment it runs.
+func TestKeyWatcherConsumesEscape(t *testing.T) {
+	if os.Getenv("SOVEREIGN_TEST_INPUT") == "" {
+		t.Skip("set SOVEREIGN_TEST_INPUT=1 to run the input-injection test")
+	}
+	const vkEsc = 0x1B
+	w, err := StartKeyWatcher(vkEsc)
+	if err != nil {
+		t.Fatalf("StartKeyWatcher: %v", err)
+	}
+	defer w.Close()
+
+	if got := w.Method(); got != "hotkey" {
+		t.Fatalf("Esc watcher installed via %q, not RegisterHotKey; the key would only be swallowed by the hook", got)
+	}
+	// The same key+modifiers are now registered; a second registration must fail with
+	// ERROR_HOTKEY_ALREADY_REGISTERED. Success would mean nothing holds the key, so it is not
+	// consumed and would reach the focused app.
+	r, _, e := procRegisterHotKey.Call(0, uintptr(keyHotkeyID+1), modNoRepeat, vkEsc)
+	if r != 0 {
+		procUnregisterHotKey.Call(0, uintptr(keyHotkeyID+1))
+		t.Fatal("a second RegisterHotKey for Esc succeeded: the watcher's registration is not live")
+	}
+	if !errors.Is(e, windows.ERROR_HOTKEY_ALREADY_REGISTERED) {
+		t.Fatalf("second RegisterHotKey failed with %v, want ERROR_HOTKEY_ALREADY_REGISTERED", e)
 	}
 }
 

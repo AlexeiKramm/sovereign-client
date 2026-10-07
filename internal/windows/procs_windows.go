@@ -50,6 +50,7 @@ const (
 	wmQuit         = 0x0012
 	hotkeyID       = 0x5011
 	hotkeyTimerID  = 0x5012
+	keyHotkeyID    = 0x5013 // the pill's single-key (Esc) watcher, a distinct RegisterHotKey id
 	hotkeyWatchdog = 30_000 // ms
 
 	modAlt      = 0x0001

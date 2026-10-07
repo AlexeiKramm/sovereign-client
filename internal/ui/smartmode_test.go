@@ -44,3 +44,22 @@ func TestSmartModeTimerOnIdleIsNoop(t *testing.T) {
 		t.Fatalf("stray timer tick = %v, want None", act)
 	}
 }
+
+// TestSmartModeResetAfterExternalStop pins the fix for "I had to press the hotkey twice": when the
+// phone ends a tapped-on dictation by itself (silence auto-stop, cancel, busy), the loop resets the
+// machine, so the next press starts a new dictation rather than trying to stop a dead one.
+func TestSmartModeResetAfterExternalStop(t *testing.T) {
+	sm := &SmartMode{}
+	if act, _ := sm.Press(); act != ActionStart {
+		t.Fatalf("press: %v, want Start", act)
+	}
+	if act, _ := sm.Release(); act != ActionNone {
+		t.Fatalf("tap release: %v, want None", act)
+	}
+	// Without a reset the machine is still "on" and the next press stops nothing.
+	sm.Reset()
+	act, arm := sm.Press()
+	if act != ActionStart || !arm {
+		t.Fatalf("press after external stop = (%v, %v), want (Start, true)", act, arm)
+	}
+}

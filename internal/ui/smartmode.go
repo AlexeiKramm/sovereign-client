@@ -68,3 +68,10 @@ func (s *SmartMode) TimerFired() Action {
 	}
 	return ActionNone
 }
+
+// Reset returns the machine to idle. The caller uses it when the session ended for a reason the
+// machine did not initiate — the phone's silence auto-stop, a cancel, a busy refusal or a dropped
+// link. Without it a tap that started a dictation the phone later auto-stopped leaves the machine
+// thinking dictation is still on, so the next press tries to stop a dead session and the one after
+// starts: the "I had to press the hotkey twice" bug.
+func (s *SmartMode) Reset() { *s = SmartMode{} }

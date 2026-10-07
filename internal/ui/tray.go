@@ -63,6 +63,7 @@ type app struct {
 	target     uintptr                 // window to inject into, captured when dictation started
 	hotkey     *winplat.HotkeyWatcher
 	armed      bool
+	smartReset chan struct{} // signals the smart-mode loop that the session ended externally
 
 	// Pill overlay (Chunk 4c). overlayOnce guards creation; pillMu guards the overlay handle, the
 	// Esc watcher and the view, kept separate from mu so a client callback never nests locks.
@@ -330,6 +331,7 @@ func (a *app) handlers() core.Handlers {
 			a.setState(mapConnState(st), detail)
 			if st != core.StateReady {
 				a.hidePill() // a dropped or unauthenticated link takes the pill down with it
+				a.signalSmartReset()
 			}
 		},
 		OnStarted: func(sessionID string) {
@@ -342,6 +344,7 @@ func (a *app) handlers() core.Handlers {
 				a.setDictating(false)
 				a.setState(StateReady, "")
 				a.hidePill()
+				a.signalSmartReset()
 			} else {
 				a.setState(StateDictating, strings.ToLower(st))
 				a.setPillStatus(pillStatus(st))
@@ -351,6 +354,7 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(false)
 			a.setState(StateError, "phone busy ("+holder+")")
 			a.hidePill()
+			a.signalSmartReset()
 		},
 		OnServerState: func(s core.ServerStatePayload) {
 			a.setPhoneState(s)
@@ -369,6 +373,7 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(false)
 			a.setState(StateReady, "")
 			a.hidePill()
+			a.signalSmartReset()
 			a.logf("utterance done (%s): %q", reason, delivery)
 			if reason == core.DoneFinal && delivery != "" {
 				a.inject(delivery)
@@ -378,6 +383,7 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(false)
 			a.setState(StateReady, "")
 			a.hidePill()
+			a.signalSmartReset()
 		},
 		OnError: func(code, msg string, fatal bool) {
 			a.logf("phone error: %s: %s (fatal=%v)", code, msg, fatal)
@@ -385,6 +391,7 @@ func (a *app) handlers() core.Handlers {
 				a.setDictating(false)
 				a.setState(StateError, code)
 				a.hidePill()
+				a.signalSmartReset()
 			} else {
 				a.setPillError(true)
 			}
@@ -486,7 +493,7 @@ const tapWindow = 250 * time.Millisecond
 
 // hotkeyLoop dispatches the watcher's chord edges for the configured mode. It runs for the lifetime
 // of one armed watcher; a mode or chord change disarms and re-arms (see rearmHotkey).
-func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string) {
+func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string, reset <-chan struct{}) {
 	switch mode {
 	case ModeToggle:
 		for ev := range w.Events() {
@@ -508,14 +515,15 @@ func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string) {
 			}
 		}
 	default: // ModeAuto
-		a.smartHotkeyLoop(w)
+		a.smartHotkeyLoop(w, reset)
 	}
 }
 
 // smartHotkeyLoop implements tap-to-toggle + hold-to-talk on one hotkey: dictation starts on the
 // press either way, and the tap window only decides whether the release stops it. The timer lives
-// here so the SmartMode machine is driven from a single goroutine.
-func (a *app) smartHotkeyLoop(w *winplat.HotkeyWatcher) {
+// here so the SmartMode machine is driven from a single goroutine. reset arrives when the session
+// ended for a reason the machine did not initiate, so it can return to idle.
+func (a *app) smartHotkeyLoop(w *winplat.HotkeyWatcher, reset <-chan struct{}) {
 	sm := &SmartMode{}
 	var timer *time.Timer
 	var tick <-chan time.Time
@@ -553,6 +561,9 @@ func (a *app) smartHotkeyLoop(w *winplat.HotkeyWatcher) {
 		case <-tick:
 			cancel()
 			sm.TimerFired()
+		case <-reset:
+			cancel()
+			sm.Reset()
 		}
 	}
 }
@@ -579,11 +590,13 @@ func (a *app) startDictation() {
 	c := a.client
 	a.mu.Unlock()
 	if c == nil {
+		a.signalSmartReset()
 		return
 	}
 	a.captureTarget()
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("dictation start failed: %v", err)
+		a.signalSmartReset()
 	}
 }
 
@@ -664,12 +677,14 @@ func (a *app) armHotkey() {
 		a.setState(StateError, "hotkey unavailable")
 		return
 	}
+	reset := make(chan struct{}, 1)
 	a.mu.Lock()
 	a.hotkey = w
 	a.armed = true
+	a.smartReset = reset
 	a.mu.Unlock()
 	a.logf("hotkey armed: %s (mode=%s)", chord, mode)
-	go a.hotkeyLoop(w, mode)
+	go a.hotkeyLoop(w, mode, reset)
 }
 
 func (a *app) disarmHotkey() {
@@ -677,9 +692,26 @@ func (a *app) disarmHotkey() {
 	w := a.hotkey
 	a.hotkey = nil
 	a.armed = false
+	a.smartReset = nil
 	a.mu.Unlock()
 	if w != nil {
 		_ = w.Close()
+	}
+}
+
+// signalSmartReset tells the smart-mode hotkey loop that the session ended for a reason it did not
+// initiate, so its tap/hold state returns to idle and the next press starts a dictation instead of
+// trying to stop a dead one. It never blocks: a pending reset already means the same thing.
+func (a *app) signalSmartReset() {
+	a.mu.Lock()
+	ch := a.smartReset
+	a.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
 }
 

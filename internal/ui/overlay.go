@@ -188,10 +188,12 @@ func (a *app) watchEsc() {
 	a.pillMu.Lock()
 	a.escWatcher = w
 	a.pillMu.Unlock()
+	a.logf("esc dismiss armed (%s)", w.Method())
 
 	go func() {
 		for ev := range w.Events() {
 			if ev == iface.Press {
+				a.logf("esc: dismissing dictation")
 				a.cancelDictation()
 			}
 		}

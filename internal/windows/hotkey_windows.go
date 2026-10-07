@@ -28,22 +28,27 @@ type Captured struct {
 // removed by Windows).
 type HotkeyWatcher struct {
 	chord    iface.Chord
-	toggle   bool
+	register bool // true: RegisterHotKey; false: the low-level hook
 	capture  bool
-	detector *iface.Detector
+	// hookFallback lets a registering watcher fall back to the consuming hook if RegisterHotKey is
+	// refused (e.g. another app already owns the key). It is how the pill's Esc dismiss stays a
+	// control even when the bare key cannot be registered.
+	hookFallback bool
+	detector     *iface.Detector
 	// swallowVK, when non-zero, is a single virtual key whose events the hook consumes (returns 1)
-	// instead of passing on to the focused app. It is how the pill's Esc dismiss acts as a control
-	// without also reaching the target field.
+	// instead of passing on to the focused app.
 	swallowVK uint32
+	id        uint32
 
 	events   chan iface.Event
 	captured chan Captured
 	ready    chan error
 	done     chan struct{}
 
-	hook   uintptr
-	hookCB uintptr
-	tid    uint32
+	registered bool // set before ready; which mechanism actually got installed
+	hook       uintptr
+	hookCB     uintptr
+	tid        uint32
 }
 
 // StartHotkey starts watching chord. toggle selects RegisterHotKey (true) or the low-level hook
@@ -51,7 +56,8 @@ type HotkeyWatcher struct {
 func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
 	return startWatcher(&HotkeyWatcher{
 		chord:    chord,
-		toggle:   toggle,
+		register: toggle,
+		id:       hotkeyID,
 		detector: iface.NewDetector(chord),
 		events:   make(chan iface.Event, 8),
 		ready:    make(chan error, 1),
@@ -59,17 +65,22 @@ func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
 	})
 }
 
-// StartKeyWatcher watches a single key with no modifiers and swallows it, so it can act as a
-// global control (the pill's Esc dismiss) rather than also reaching the focused app.
+// StartKeyWatcher watches a single key with no modifiers and consumes it, so it can act as a global
+// control (the pill's Esc dismiss) rather than also reaching the focused app. RegisterHotKey is
+// tried first because the system consumes a registered hotkey outright; the consuming hook is the
+// fallback when the key cannot be registered.
 func StartKeyWatcher(vk uint32) (*HotkeyWatcher, error) {
 	chord := iface.NewChord(vk, iface.Modifiers{})
 	return startWatcher(&HotkeyWatcher{
-		chord:     chord,
-		detector:  iface.NewDetector(chord),
-		swallowVK: vk,
-		events:    make(chan iface.Event, 8),
-		ready:     make(chan error, 1),
-		done:      make(chan struct{}),
+		chord:        chord,
+		register:     true,
+		hookFallback: true,
+		id:           keyHotkeyID,
+		swallowVK:    vk,
+		detector:     iface.NewDetector(chord),
+		events:       make(chan iface.Event, 8),
+		ready:        make(chan error, 1),
+		done:         make(chan struct{}),
 	})
 }
 
@@ -84,6 +95,15 @@ func startWatcher(w *HotkeyWatcher) (*HotkeyWatcher, error) {
 		return nil, errors.New("hotkey thread did not become ready")
 	}
 	return w, nil
+}
+
+// Method reports which mechanism was installed: "hotkey" (RegisterHotKey, which the system
+// consumes) or "hook" (the low-level hook, which swallows the key itself).
+func (w *HotkeyWatcher) Method() string {
+	if w.registered {
+		return "hotkey"
+	}
+	return "hook"
 }
 
 // Events returns the chord edge channel. It is closed when the watcher stops.
@@ -141,13 +161,16 @@ func (w *HotkeyWatcher) run() {
 		return
 	}
 
-	if w.toggle {
+	if w.register {
 		mods := uintptr(registerMods(w.chord.Mods)) | modNoRepeat
-		if r, _, e := procRegisterHotKey.Call(0, hotkeyID, mods, uintptr(w.chord.VK)); r == 0 {
+		if r, _, e := procRegisterHotKey.Call(0, uintptr(w.id), mods, uintptr(w.chord.VK)); r != 0 {
+			w.registered = true
+		} else if !w.hookFallback {
 			w.ready <- fmt.Errorf("RegisterHotKey(%s): %w", w.chord, e)
 			return
 		}
-	} else {
+	}
+	if !w.registered {
 		if err := w.setHook(); err != nil {
 			w.ready <- err
 			return
@@ -165,19 +188,19 @@ func (w *HotkeyWatcher) run() {
 		}
 		switch m.message {
 		case wmHotkey:
-			if w.toggle {
+			if w.register {
 				w.emit(iface.Press)
 			}
 		case wmTimer:
-			if !w.toggle {
+			if !w.registered {
 				w.rearm()
 			}
 		}
 	}
 
 	// Teardown.
-	if w.toggle {
-		procUnregisterHotKey.Call(0, hotkeyID)
+	if w.registered {
+		procUnregisterHotKey.Call(0, uintptr(w.id))
 	} else {
 		procKillTimer.Call(0, hotkeyTimerID)
 		if w.hook != 0 {
