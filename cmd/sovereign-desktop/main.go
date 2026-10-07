@@ -1,8 +1,8 @@
 // Command sovereign-desktop is the Windows tray client for the Sovereign phone server.
 //
 // With no flags it runs the tray app: single instance, connect/reconnect to the phone, tray state,
-// and the settings shell. The flags below drive the same transport headlessly for development and
-// verification; hotkeys, injection and the pill overlay arrive with the rest of Chunk 4.
+// the settings shell, global hotkeys with text injection, and the floating pill overlay. The flags
+// below drive the same transport headlessly for development and verification.
 package main
 
 import (
@@ -127,6 +127,11 @@ func runTray(ident core.Identity, store core.CredentialStore, addr, pin string, 
 		return err
 	}
 	logger.Printf("starting tray (addr=%q pin=%q)", addr, pin)
+	// Per-Monitor-V2 DPI before any window exists, so the tray and the pill are crisp on scaled
+	// displays and the pill's physical size is predictable.
+	if err := winplat.EnablePerMonitorDPI(); err != nil {
+		logger.Printf("per-monitor DPI unavailable: %v", err)
+	}
 	ui.Run(ui.Options{
 		Identity:        ident,
 		Store:           store,

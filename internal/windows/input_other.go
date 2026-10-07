@@ -39,6 +39,13 @@ func StartHotkeyCapture() (*HotkeyWatcher, error) {
 	return &HotkeyWatcher{events: ch}, nil
 }
 
+// StartKeyWatcher returns an inert single-key watcher off Windows.
+func StartKeyWatcher(vk uint32) (*HotkeyWatcher, error) {
+	ch := make(chan iface.Event)
+	close(ch)
+	return &HotkeyWatcher{events: ch}, nil
+}
+
 // Events returns an already-closed channel.
 func (w *HotkeyWatcher) Events() <-chan iface.Event { return w.events }
 

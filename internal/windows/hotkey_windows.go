@@ -31,6 +31,10 @@ type HotkeyWatcher struct {
 	toggle   bool
 	capture  bool
 	detector *iface.Detector
+	// swallowVK, when non-zero, is a single virtual key whose events the hook consumes (returns 1)
+	// instead of passing on to the focused app. It is how the pill's Esc dismiss acts as a control
+	// without also reaching the target field.
+	swallowVK uint32
 
 	events   chan iface.Event
 	captured chan Captured
@@ -45,14 +49,31 @@ type HotkeyWatcher struct {
 // StartHotkey starts watching chord. toggle selects RegisterHotKey (true) or the low-level hook
 // (false). It returns once the watcher is installed, or with the installation error.
 func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
-	w := &HotkeyWatcher{
+	return startWatcher(&HotkeyWatcher{
 		chord:    chord,
 		toggle:   toggle,
 		detector: iface.NewDetector(chord),
 		events:   make(chan iface.Event, 8),
 		ready:    make(chan error, 1),
 		done:     make(chan struct{}),
-	}
+	})
+}
+
+// StartKeyWatcher watches a single key with no modifiers and swallows it, so it can act as a
+// global control (the pill's Esc dismiss) rather than also reaching the focused app.
+func StartKeyWatcher(vk uint32) (*HotkeyWatcher, error) {
+	chord := iface.NewChord(vk, iface.Modifiers{})
+	return startWatcher(&HotkeyWatcher{
+		chord:     chord,
+		detector:  iface.NewDetector(chord),
+		swallowVK: vk,
+		events:    make(chan iface.Event, 8),
+		ready:     make(chan error, 1),
+		done:      make(chan struct{}),
+	})
+}
+
+func startWatcher(w *HotkeyWatcher) (*HotkeyWatcher, error) {
 	go w.run()
 	select {
 	case err := <-w.ready:
@@ -184,17 +205,24 @@ func (w *HotkeyWatcher) rearm() {
 
 // hookProc is called on the hook thread for every key event. It must be trivial.
 func (w *HotkeyWatcher) hookProc(code, wparam, lparam uintptr) uintptr {
+	swallow := false
 	if int32(code) >= 0 {
 		switch uint32(wparam) {
 		case wmKeyDown, wmSysKeyDown, wmKeyUp, wmSysKeyUp:
 			kb := (*kbdllHookStruct)(uptrToPtr(lparam))
 			down := uint32(wparam) == wmKeyDown || uint32(wparam) == wmSysKeyDown
+			if w.swallowVK != 0 && kb.vkCode == w.swallowVK {
+				swallow = true
+			}
 			if w.capture {
 				w.captureKey(kb.vkCode, down)
 			} else if ev, ok := w.detector.Key(kb.vkCode, down, currentModifiers()); ok {
 				w.emit(ev)
 			}
 		}
+	}
+	if swallow {
+		return 1 // consumed: do not pass this key to the rest of the chain / the focused app
 	}
 	r, _, _ := procCallNextHookEx.Call(0, code, wparam, lparam)
 	return r

@@ -64,6 +64,14 @@ type app struct {
 	hotkey     *winplat.HotkeyWatcher
 	armed      bool
 
+	// Pill overlay (Chunk 4c). overlayOnce guards creation; pillMu guards the overlay handle, the
+	// Esc watcher and the view, kept separate from mu so a client callback never nests locks.
+	overlayOnce sync.Once
+	pillMu      sync.Mutex
+	overlay     *winplat.Overlay
+	escWatcher  *winplat.HotkeyWatcher
+	pill        pillView
+
 	mStatus    *systray.MenuItem
 	mTest      *systray.MenuItem
 	mPair      *systray.MenuItem
@@ -195,6 +203,7 @@ func (a *app) onClicks(item *systray.MenuItem, fn func()) {
 
 func (a *app) quit() {
 	a.disarmHotkey()
+	a.closePill()
 	a.cancel()
 	systray.Quit()
 }
@@ -319,37 +328,47 @@ func (a *app) handlers() core.Handlers {
 	return core.Handlers{
 		OnConn: func(st core.ConnState, detail string) {
 			a.setState(mapConnState(st), detail)
+			if st != core.StateReady {
+				a.hidePill() // a dropped or unauthenticated link takes the pill down with it
+			}
 		},
 		OnStarted: func(sessionID string) {
 			a.setDictating(true)
 			a.setState(StateDictating, "listening")
+			a.startPill()
 		},
 		OnState: func(sessionID, st string) {
 			if st == core.StateIdle {
 				a.setDictating(false)
 				a.setState(StateReady, "")
+				a.hidePill()
 			} else {
 				a.setState(StateDictating, strings.ToLower(st))
+				a.setPillStatus(pillStatus(st))
 			}
 		},
 		OnBusy: func(holder string, takeover bool) {
 			a.setDictating(false)
 			a.setState(StateError, "phone busy ("+holder+")")
+			a.hidePill()
 		},
 		OnServerState: func(s core.ServerStatePayload) {
 			a.setPhoneState(s)
 		},
 		OnCommitted: func(sessionID, text string, perf core.CommitPerf) {
 			a.logf("commit: %q (asr=%dms cleanup=%dms)", text, perf.AsrMs, perf.CleanupMs)
+			a.setPillCommitted(text)
 		},
 		OnProvisional: func(sessionID, text string) {
 			a.logf("live: %q", text)
+			a.setPillProvisional(text)
 		},
 		// UTTERANCE_DONE is the only injection trigger (PROTOCOL.md §6), and only FINAL carries
 		// text worth typing.
 		OnUtterance: func(sessionID, delivery, raw, reason string) {
 			a.setDictating(false)
 			a.setState(StateReady, "")
+			a.hidePill()
 			a.logf("utterance done (%s): %q", reason, delivery)
 			if reason == core.DoneFinal && delivery != "" {
 				a.inject(delivery)
@@ -358,15 +377,36 @@ func (a *app) handlers() core.Handlers {
 		OnReleased: func(sessionID, reason string) {
 			a.setDictating(false)
 			a.setState(StateReady, "")
+			a.hidePill()
 		},
 		OnError: func(code, msg string, fatal bool) {
 			a.logf("phone error: %s: %s (fatal=%v)", code, msg, fatal)
 			if fatal {
 				a.setDictating(false)
 				a.setState(StateError, code)
+				a.hidePill()
+			} else {
+				a.setPillError(true)
 			}
 		},
 		OnLatency: func(line string) { a.logf("latency: %s", line) },
+	}
+}
+
+// pillStatus maps a wire session state to the pill's header text, mirroring the phone card's
+// wording (floating/FloatingPillView.kt).
+func pillStatus(state string) string {
+	switch state {
+	case core.StateWarming:
+		return "Warming up…"
+	case core.StateProcessing:
+		return "Finishing…"
+	case core.StateListening:
+		return "Listening…"
+	case core.StateError:
+		return "Error"
+	default:
+		return state
 	}
 }
 

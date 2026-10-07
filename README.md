@@ -8,8 +8,8 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 > **Status: early.** The wire-protocol codec and the transport core — mDNS discovery, pinned-TLS
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
 > latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
-> pairing, settings, single-instance, autostart) and the global hold/toggle hotkeys with `SendInput`
-> injection are in; the floating pill overlay (Chunk 4c) is next.
+> pairing, settings, single-instance, autostart), the global hold/toggle hotkeys with `SendInput`
+> injection, and the floating pill overlay are in. The control window (Chunk 4d) is next.
 
 ## Where the docs live
 
@@ -64,6 +64,13 @@ With the phone connected, use the hotkey (default `Ctrl+Alt+Space`, rebindable v
 custom hotkey…**). The default **auto** mode uses one key for both gestures: a quick **tap** starts
 dictation and leaves it running (tap again to stop), while **holding** records until you release.
 `Hold to talk` and `Press to toggle` remain selectable modes.
+
+While you speak, a floating **pill** appears at the corner chosen under **Overlay position** (bottom
+right by default). It shows the settled text in white and the live tail of the unit still being
+recognised in grey — the same split as the phone's card. The pill is a layered window: it is
+click-through, never takes focus from the field you are dictating into, and is dismissed by **Esc**
+(which ends the session without inserting) or by ending dictation. Its status line tracks the phone
+(`Warming up…` → `Listening…` → `Finishing…`).
 
 The finished block is inserted at the cursor of the window you started in. Insertion defaults to
 **paste** — one Ctrl+V, fast and atomic at any length — with the clipboard restored afterwards; set
