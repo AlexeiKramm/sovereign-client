@@ -202,6 +202,22 @@ type HelloPayload struct {
 	Capabilities []string `json:"capabilities"`
 }
 
+// MarshalJSON guarantees `capabilities` is a JSON array, never `null`. The phone's kotlinx
+// serializer rejects `null` for a List<String> — a HELLO built with a nil slice made the real
+// server answer ERROR{INTERNAL}, so a zero-valued HelloPayload must still encode `[]`.
+func (h HelloPayload) MarshalJSON() ([]byte, error) {
+	caps := h.Capabilities
+	if caps == nil {
+		caps = []string{}
+	}
+	return json.Marshal(struct {
+		Token        string   `json:"token"`
+		DeviceID     string   `json:"deviceId"`
+		Protover     int64    `json:"protover"`
+		Capabilities []string `json:"capabilities"`
+	}{h.Token, h.DeviceID, h.Protover, caps})
+}
+
 type WelcomePayload struct {
 	Protover      int64    `json:"protover"`
 	DeviceID      string   `json:"deviceId"`

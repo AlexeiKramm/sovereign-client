@@ -205,6 +205,26 @@ func TestMalformedJSONIsRejected(t *testing.T) {
 	}
 }
 
+// Regression: a HELLO built with a nil capabilities slice must still encode `[]`, never `null`.
+// The phone's kotlinx serializer rejects `null` for List<String>, answering ERROR{INTERNAL}
+// (hit against the real phone while probing discovery).
+func TestHelloCapabilitiesIsNeverNull(t *testing.T) {
+	mt, ok := Lookup("HELLO")
+	if !ok {
+		t.Fatal("HELLO missing from catalogue")
+	}
+	b, err := Encode(Message{Type: mt, ID: "x", Ts: 1, Payload: &HelloPayload{Token: "t", DeviceID: "d", Protover: Version}})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if strings.Contains(string(b), `"capabilities":null`) {
+		t.Fatalf("HELLO must not encode capabilities as null: %s", b)
+	}
+	if !strings.Contains(string(b), `"capabilities":[]`) {
+		t.Fatalf("HELLO must encode an empty capabilities array: %s", b)
+	}
+}
+
 // sameMessage compares everything except MessageType, whose newValue func field makes the
 // struct non-comparable and non-DeepEqual.
 func sameMessage(a, b Message) bool {

@@ -98,10 +98,11 @@ func run() error {
 func runDiscover(timeout time.Duration) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	peer, err := core.Browse(ctx, timeout)
+	peer, err := core.Discover(ctx, timeout)
 	if err != nil {
 		return fmt.Errorf("discovery failed (%w); pass -addr host:port instead", err)
 	}
+	fmt.Printf("found via: %s\n", peer.Via)
 	fmt.Printf("instance:  %s\n", peer.Instance)
 	fmt.Printf("name:      %s\n", peer.Name)
 	fmt.Printf("deviceId:  %s\n", peer.DeviceID)
@@ -129,7 +130,7 @@ func runClient(addr, pin, token string, once bool, seconds float64, timeout time
 
 	target := addr
 	if target == "" {
-		peer, err := core.Browse(ctx, timeout)
+		peer, err := core.Discover(ctx, timeout)
 		if err != nil {
 			return fmt.Errorf("discovery failed (%w); pass -addr host:port", err)
 		}
@@ -137,9 +138,16 @@ func runClient(addr, pin, token string, once bool, seconds float64, timeout time
 		if creds.ServerSpki == "" {
 			creds.ServerSpki = peer.Spki
 		}
-		fmt.Printf("discovered %q at %s\n", peer.Name, peer.Addr)
+		if peer.Via == core.ViaProbe {
+			fmt.Printf("found phone at %s by LAN probe (mDNS found nothing)\n", peer.Addr)
+		} else {
+			fmt.Printf("discovered %q at %s\n", peer.Name, peer.Addr)
+		}
 	}
 	if creds.ServerSpki == "" {
+		if target != "" {
+			return fmt.Errorf("phone at %s is not pinned yet; run: sovereign-desktop -pair -addr %s", target, target)
+		}
 		return errors.New("no pin available: pass -pin, run -pair first, or use -discover")
 	}
 	if creds.Token == "" {

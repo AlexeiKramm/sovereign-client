@@ -12,8 +12,8 @@ import (
 	"github.com/hashicorp/mdns"
 )
 
-// ErrNoPeer means no v1 Sovereign phone answered the mDNS browse before the timeout. It is not
-// fatal: manual host:port is the first-class fallback (PROTOCOL.md §2).
+// ErrNoPeer means no v1 Sovereign phone answered before the timeout. It is not fatal: manual
+// host:port and the TCP probe are the fallbacks (PROTOCOL.md §2).
 var ErrNoPeer = errors.New("no Sovereign phone found on the LAN")
 
 // mdnsQueryService is ServiceType without its ".local" suffix: hashicorp/mdns appends the domain
@@ -30,7 +30,13 @@ const (
 	txtPaired   = "paired"
 )
 
-// Peer is one phone discovered over mDNS (PROTOCOL.md §2): the SRV record plus the TXT keys.
+// How a Peer was found.
+const (
+	ViaMDNS  = "mdns"
+	ViaProbe = "probe"
+)
+
+// Peer is one phone discovered on the LAN (PROTOCOL.md §2): the SRV record plus the TXT keys.
 type Peer struct {
 	Instance string // mDNS instance, e.g. "Sovereign-1a2b3c4d"
 	DeviceID string // phone deviceId from TXT `id`
@@ -42,6 +48,70 @@ type Peer struct {
 	Host     string // mDNS host name (no trailing dot), used when no IP resolved
 	Port     int    // SRV port
 	Addr     string // host:port to dial
+	Via      string // ViaMDNS or ViaProbe
+}
+
+// virtualInterfaceHints are name fragments of adapters that must never carry LAN discovery: VPNs,
+// hypervisor bridges and container networks either never reach the LAN or would route the query
+// off it (PROTOCOL.md §2 explicitly cites VPN / multi-NIC hosts as a discovery hazard).
+var virtualInterfaceHints = []string{
+	"tailscale", "wsl", "vethernet", "hyper-v", "vmware", "virtualbox", "vbox",
+	"docker", "zerotier", "wireguard", "wintun", "vgate", "teredo", "isatap",
+	"bluetooth", "npcap", "loopback", "tun", "tap", "wg",
+}
+
+// isVirtualInterface reports whether an interface name looks like a VPN/virtual adapter.
+func isVirtualInterface(name string) bool {
+	n := strings.ToLower(name)
+	for _, h := range virtualInterfaceHints {
+		if strings.Contains(n, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// localIPv4Interfaces returns up, non-loopback, non-virtual interfaces that hold a usable IPv4
+// address (never a link-local 169.254 address).
+func localIPv4Interfaces() []net.Interface {
+	all, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []net.Interface
+	for _, ifc := range all {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if isVirtualInterface(ifc.Name) {
+			continue
+		}
+		if ipv4Of(&ifc) == "" {
+			continue
+		}
+		out = append(out, ifc)
+	}
+	return out
+}
+
+// ipv4Of returns the first usable IPv4 address of an interface, or "".
+func ipv4Of(ifc *net.Interface) string {
+	addrs, err := ifc.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipn.IP.To4()
+		if ip4 == nil || ip4.IsLinkLocalUnicast() {
+			continue
+		}
+		return ip4.String()
+	}
+	return ""
 }
 
 // parseTXT turns mDNS `InfoFields` ("k=v") into a map; a repeated key keeps the last value.
@@ -102,13 +172,37 @@ func peerFromEntry(e *mdns.ServiceEntry) (Peer, error) {
 	}, nil
 }
 
-// Browse discovers phones via mDNS and returns the first v1 server it finds, or ErrNoPeer. mDNS is
-// blocked by AP/client isolation and misrouted by VPNs, so a negative result must never be a dead
-// end — the caller falls back to a manual host:port.
+// Browse discovers phones over mDNS. It queries each physical interface in turn (virtual adapters
+// are filtered out, per the plan's "bind all NICs; filter virtual adapters") and returns the first
+// v1 server it hears. A negative result returns ErrNoPeer, never a dead end.
 func Browse(ctx context.Context, timeout time.Duration) (Peer, error) {
 	if timeout <= 0 {
 		timeout = time.Second
 	}
+	ifaces := localIPv4Interfaces()
+	if len(ifaces) == 0 {
+		// No usable physical NIC: fall back to the OS default so discovery is still attempted.
+		return browseInterface(ctx, nil, timeout)
+	}
+	per := timeout / time.Duration(len(ifaces))
+	if per < 500*time.Millisecond {
+		per = 500 * time.Millisecond
+	}
+	for i := range ifaces {
+		p, err := browseInterface(ctx, &ifaces[i], per)
+		if err == nil {
+			p.Via = ViaMDNS
+			return p, nil
+		}
+		if ctx.Err() != nil {
+			return Peer{}, ctx.Err()
+		}
+	}
+	return Peer{}, ErrNoPeer
+}
+
+// browseInterface runs one mDNS query on a single interface (nil = the OS default).
+func browseInterface(ctx context.Context, iface *net.Interface, timeout time.Duration) (Peer, error) {
 	qctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -116,10 +210,11 @@ func Browse(ctx context.Context, timeout time.Duration) (Peer, error) {
 	go func() {
 		defer close(entries)
 		_ = mdns.QueryContext(qctx, &mdns.QueryParam{
-			Service: mdnsQueryService,
-			Domain:  "local",
-			Timeout: timeout,
-			Entries: entries,
+			Service:   mdnsQueryService,
+			Domain:    "local",
+			Timeout:   timeout,
+			Interface: iface,
+			Entries:   entries,
 		})
 	}()
 
