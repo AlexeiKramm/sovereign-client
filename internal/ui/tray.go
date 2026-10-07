@@ -53,18 +53,21 @@ type app struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	creds      core.Credentials
-	paired     bool
-	client     *core.Client
-	connecting bool
-	connCancel context.CancelFunc
-	dictating  bool                    // a hotkey-initiated session is live
-	phoneState core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
-	target     uintptr                 // window to inject into, captured when dictation started
-	hotkey     *winplat.HotkeyWatcher
-	armed      bool
-	smartReset chan struct{} // signals the smart-mode loop that the session ended externally
+	mu            sync.Mutex
+	creds         core.Credentials
+	paired        bool
+	client        *core.Client
+	connecting    bool
+	connCancel    context.CancelFunc
+	dictating     bool                    // a hotkey-initiated session is live
+	phoneState    core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
+	target        uintptr                 // window to inject into, captured when dictation started
+	hotkey        *winplat.HotkeyWatcher
+	armed         bool
+	smartReset    chan struct{} // signals the smart-mode loop that the session ended externally
+	hotkeyCapture bool          // the panel is capturing a new hotkey
+	hotkeyAbort   chan struct{} // cancels an in-flight capture (panel closed)
+	startupOn     bool          // cached "Start with Windows" state, for the panel's toggle
 
 	// Pill overlay (Chunk 4c). overlayOnce guards creation; pillMu guards the overlay handle, the
 	// Esc watcher and the view, kept separate from mu so a client callback never nests locks.
@@ -74,7 +77,7 @@ type app struct {
 	escWatcher  *winplat.HotkeyWatcher
 	pill        pillView
 
-	// Control panel (Chunk 4d-a). panelOnce guards creation; panelMu guards the window, the view,
+	// Control panel (Chunk 4d). panelOnce guards creation; panelMu guards the window, the view,
 	// the last rendered layout (for hit-testing) and the drag/position state.
 	panelOnce     sync.Once
 	panelMu       sync.Mutex
@@ -93,21 +96,12 @@ type app struct {
 	lastLatency   string
 	sessionCount  int
 
-	mStatus    *systray.MenuItem
-	mTest      *systray.MenuItem
-	mPanel     *systray.MenuItem
-	mPair      *systray.MenuItem
-	mUnpair    *systray.MenuItem
-	mAuto      *systray.MenuItem
-	mHold      *systray.MenuItem
-	mToggle    *systray.MenuItem
-	mHotkey    *systray.MenuItem
-	mSetHotkey *systray.MenuItem
-	mStartup   *systray.MenuItem
-	mQuit      *systray.MenuItem
-	hotkeys    map[string]*systray.MenuItem
-	insertion  map[string]*systray.MenuItem
-	positions  map[string]*systray.MenuItem
+	// The tray is deliberately small: settings live in the panel (Chunk 4d-b).
+	mStatus *systray.MenuItem
+	mTest   *systray.MenuItem
+	mPanel  *systray.MenuItem
+	mPair   *systray.MenuItem
+	mQuit   *systray.MenuItem
 }
 
 func (a *app) onReady() {
@@ -124,6 +118,7 @@ func (a *app) onReady() {
 	}
 	a.mu.Lock()
 	a.creds, a.paired = creds, paired
+	a.startupOn = a.startupEnabled()
 	a.mu.Unlock()
 
 	a.buildMenu(paired)
@@ -144,70 +139,24 @@ func (a *app) buildMenu(paired bool) {
 	a.mStatus.Disable()
 	a.mTest = systray.AddMenuItem("Test dictation (5s)", "Start and stop a five-second dictation")
 	a.mTest.Disable()
-	a.mPanel = systray.AddMenuItem("Open control panel", "Live transcript and status")
+	a.mPanel = systray.AddMenuItem("Open control panel", "Live transcript and settings")
 
 	systray.AddSeparator()
 	a.mPair = systray.AddMenuItem("Pair with phone…", "Run mutual-accept pairing")
-	a.mUnpair = systray.AddMenuItem("Unpair…", "Delete the stored token and pin")
-
-	systray.AddSeparator()
-	mode := systray.AddMenuItem("Dictation mode", "Tap to toggle, hold to talk")
-	a.mAuto = mode.AddSubMenuItemCheckbox("Tap to toggle, hold to talk", "", a.settings.Mode == ModeAuto)
-	a.mHold = mode.AddSubMenuItemCheckbox("Hold to talk", "", a.settings.Mode == ModeHold)
-	a.mToggle = mode.AddSubMenuItemCheckbox("Press to toggle", "", a.settings.Mode == ModeToggle)
-
-	a.mHotkey = systray.AddMenuItem(hotkeyTitle(a.settings.Hotkey), "The global dictation hotkey")
-	a.hotkeys = map[string]*systray.MenuItem{}
-	for _, p := range HotkeyPresets {
-		a.hotkeys[p] = a.mHotkey.AddSubMenuItemCheckbox(p, "", p == a.settings.Hotkey)
-	}
-	a.mSetHotkey = a.mHotkey.AddSubMenuItem("Set custom hotkey…", "Press the combination you want")
-
-	insert := systray.AddMenuItem("Insertion", "How the finished text is written")
-	a.insertion = map[string]*systray.MenuItem{}
-	for _, m := range insertions {
-		a.insertion[m] = insert.AddSubMenuItemCheckbox(insertionLabel(m), "", m == a.settings.Insertion)
-	}
-
-	pos := systray.AddMenuItem("Overlay position", "Where the pill appears on screen")
-	a.positions = map[string]*systray.MenuItem{}
-	for _, p := range overlayPositions {
-		a.positions[p] = pos.AddSubMenuItemCheckbox(posLabel(p), "", p == a.settings.OverlayPosition)
-	}
-
-	a.mStartup = systray.AddMenuItemCheckbox("Start with Windows", "Launch the tray at sign-in", a.startupEnabled())
 
 	systray.AddSeparator()
 	a.mQuit = systray.AddMenuItem("Quit", "Exit Sovereign desktop")
 
+	// The tray is deliberately small: dictation mode, hotkey, insertion, overlay position, Start
+	// with Windows, unpair and quit live in the control panel (Chunk 4d-b).
 	if paired {
 		a.mPair.Disable()
-	} else {
-		a.mUnpair.Disable()
 	}
 
 	a.onClicks(a.mTest, func() { go a.testDictation() })
 	a.onClicks(a.mPanel, func() { a.openPanel() })
 	a.onClicks(a.mPair, func() { go a.doPair() })
-	a.onClicks(a.mUnpair, func() { go a.doUnpair() })
-	a.onClicks(a.mAuto, func() { a.setMode(ModeAuto) })
-	a.onClicks(a.mHold, func() { a.setMode(ModeHold) })
-	a.onClicks(a.mToggle, func() { a.setMode(ModeToggle) })
-	a.onClicks(a.mSetHotkey, func() { go a.doSetHotkey() })
-	a.onClicks(a.mStartup, func() { a.toggleStartup() })
 	a.onClicks(a.mQuit, a.quit)
-	for p, item := range a.hotkeys {
-		p, item := p, item
-		a.onClicks(item, func() { a.applyHotkey(p) })
-	}
-	for m, item := range a.insertion {
-		m, item := m, item
-		a.onClicks(item, func() { a.setInsertion(m) })
-	}
-	for p, item := range a.positions {
-		p, item := p, item
-		a.onClicks(item, func() { a.setPosition(p) })
-	}
 
 	// systray reports a single left tap, not a double-click, so a left click opens the panel and
 	// the right-click menu keeps everything else. The callback must not block the message loop.
@@ -763,7 +712,9 @@ func (a *app) rearmHotkey() {
 }
 
 func (a *app) doPair() {
-	a.mPair.Disable()
+	if a.mPair != nil {
+		a.mPair.Disable()
+	}
 	a.setState(StateConnecting, "pairing")
 	target := a.opts.Addr
 	if target == "" {
@@ -806,8 +757,8 @@ func (a *app) doPair() {
 	a.creds, a.paired = creds, true
 	a.mu.Unlock()
 
-	a.mUnpair.Enable()
 	a.setState(StateReady, "paired with "+creds.ServerName)
+	a.refreshPanel()
 	a.logf("paired with %q", creds.ServerName)
 	go a.connect()
 }
@@ -828,8 +779,8 @@ func (a *app) doUnpair() {
 	a.mu.Unlock()
 
 	a.mPair.Enable()
-	a.mUnpair.Disable()
 	a.setState(StateOffline, "not paired")
+	a.refreshPanel()
 	a.logf("unpaired; credentials deleted")
 }
 
@@ -838,27 +789,20 @@ func (a *app) setMode(m string) {
 	a.settings.Mode = m
 	s := a.settings
 	a.mu.Unlock()
-	setChecked(a.mAuto, m == ModeAuto)
-	setChecked(a.mHold, m == ModeHold)
-	setChecked(a.mToggle, m == ModeToggle)
 	a.persist(s)
 	a.rearmHotkey()
+	a.refreshPanel()
 }
 
-// applyHotkey stores a hotkey (a preset or a captured custom one), updates the menu, and re-arms.
+// applyHotkey stores a hotkey (from the panel's capture) and re-arms the watcher.
 func (a *app) applyHotkey(spec string) {
 	a.mu.Lock()
 	a.settings.Hotkey = spec
 	s := a.settings
 	a.mu.Unlock()
-	for k, item := range a.hotkeys {
-		setChecked(item, k == spec)
-	}
-	if a.mHotkey != nil {
-		a.mHotkey.SetTitle(hotkeyTitle(spec))
-	}
 	a.persist(s)
 	a.rearmHotkey()
+	a.refreshPanel()
 }
 
 func (a *app) setInsertion(m string) {
@@ -866,10 +810,8 @@ func (a *app) setInsertion(m string) {
 	a.settings.Insertion = m
 	s := a.settings
 	a.mu.Unlock()
-	for k, item := range a.insertion {
-		setChecked(item, k == m)
-	}
 	a.persist(s)
+	a.refreshPanel()
 }
 
 func (a *app) setPosition(p string) {
@@ -877,44 +819,8 @@ func (a *app) setPosition(p string) {
 	a.settings.OverlayPosition = p
 	s := a.settings
 	a.mu.Unlock()
-	for k, item := range a.positions {
-		setChecked(item, k == p)
-	}
 	a.persist(s)
-}
-
-// doSetHotkey captures the next key combination the user presses and binds it. The main watcher is
-// disarmed first so the pressed chord does not also fire the current hotkey.
-func (a *app) doSetHotkey() {
-	winplat.InfoBox("Set hotkey",
-		"Click OK, then press the key combination you want to dictate with.\n\n"+
-			"Use at least one modifier (Ctrl/Alt/Shift/Win), or an F-key on its own.")
-
-	a.disarmHotkey()
-	w, err := winplat.StartHotkeyCapture()
-	if err != nil {
-		a.logf("hotkey capture failed: %v", err)
-		a.armHotkey()
-		return
-	}
-	defer func() {
-		_ = w.Close()
-		a.armHotkey()
-	}()
-
-	select {
-	case c := <-w.Captured():
-		if c.Mods == (iface.Modifiers{}) && !iface.IsFunctionKey(c.VK) {
-			winplat.InfoBox("Set hotkey", "That key has no modifier, so it would be captured everywhere.\n\nUse at least one modifier, or an F-key.")
-			return
-		}
-		chord := iface.NewChord(c.VK, c.Mods)
-		a.applyHotkey(chord.String())
-		a.logf("hotkey set to %s", chord)
-	case <-time.After(15 * time.Second):
-		winplat.InfoBox("Set hotkey", "No hotkey was captured; keeping the current one.")
-	case <-a.ctx.Done():
-	}
+	a.refreshPanel()
 }
 
 func (a *app) toggleStartup() {
@@ -924,12 +830,11 @@ func (a *app) toggleStartup() {
 		winplat.InfoBox("Start with Windows", err.Error())
 		return
 	}
-	if enable {
-		a.mStartup.Check()
-	} else {
-		a.mStartup.Uncheck()
-	}
+	a.mu.Lock()
+	a.startupOn = enable
+	a.mu.Unlock()
 	a.logf("autostart set to %v", enable)
+	a.refreshPanel()
 }
 
 func (a *app) startupEnabled() bool {
@@ -977,37 +882,6 @@ func statusTitle(s TrayState, detail string) string {
 		return stateLabel(s) + " — " + detail
 	}
 	return stateLabel(s)
-}
-
-func posLabel(p string) string {
-	switch p {
-	case PosBottomLeft:
-		return "Bottom left"
-	case PosTopRight:
-		return "Top right"
-	case PosTopLeft:
-		return "Top left"
-	default:
-		return "Bottom right"
-	}
-}
-
-func insertionLabel(m string) string {
-	if m == InsertType {
-		return "Type (keystrokes)"
-	}
-	return "Paste (fast)"
-}
-
-func hotkeyTitle(spec string) string { return "Hotkey: " + spec }
-
-// setChecked is Check/Uncheck by value, for the radio-style menu groups.
-func setChecked(item *systray.MenuItem, checked bool) {
-	if checked {
-		item.Check()
-	} else {
-		item.Uncheck()
-	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

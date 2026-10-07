@@ -2,8 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core"
+	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
 	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
 )
@@ -37,8 +40,10 @@ func (a *app) openPanel() {
 	}
 }
 
-// closePanel hides the control window; the tray keeps running.
+// closePanel hides the control window and abandons any in-flight hotkey capture; the tray keeps
+// running.
 func (a *app) closePanel() {
+	a.cancelHotkeyCapture()
 	a.panelMu.Lock()
 	a.panelContent.shown = false
 	ov := a.panelWin
@@ -112,7 +117,7 @@ func (a *app) updatePanel(fn func(*panelView)) {
 	}
 }
 
-// refreshPanel repaints the panel if it is open, e.g. after the latency/session counters change.
+// refreshPanel repaints the panel if it is open, e.g. after a setting changes.
 func (a *app) refreshPanel() {
 	a.panelMu.Lock()
 	shown := a.panelContent.shown
@@ -120,6 +125,50 @@ func (a *app) refreshPanel() {
 	if shown {
 		a.repaintPanel()
 	}
+}
+
+// panelRows builds the settings rows from the current configuration. It is rebuilt on every repaint
+// so a change takes effect immediately.
+func (a *app) panelRows() []render.Row {
+	a.mu.Lock()
+	s := a.settings
+	paired := a.paired
+	server := a.creds.ServerName
+	capturing := a.hotkeyCapture
+	startup := a.startupOn
+	a.mu.Unlock()
+
+	hotkey := s.Hotkey
+	if capturing {
+		hotkey = "Press a key…"
+	}
+
+	rows := []render.Row{
+		{Kind: render.RowChips, Text: "Dictation mode", Options: []render.Option{
+			{ID: "mode:" + ModeAuto, Text: "Tap or hold", On: s.Mode == ModeAuto},
+			{ID: "mode:" + ModeHold, Text: "Hold to talk", On: s.Mode == ModeHold},
+			{ID: "mode:" + ModeToggle, Text: "Press to toggle", On: s.Mode == ModeToggle},
+		}},
+		{Kind: render.RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: hotkey},
+		{Kind: render.RowChips, Text: "Insertion", Options: []render.Option{
+			{ID: "insertion:" + InsertPaste, Text: "Paste (fast)", On: s.Insertion == InsertPaste},
+			{ID: "insertion:" + InsertType, Text: "Type", On: s.Insertion == InsertType},
+		}},
+		{Kind: render.RowChips, Text: "Overlay position", Options: []render.Option{
+			{ID: "position:" + PosBottomRight, Text: "Bottom right", On: s.OverlayPosition == PosBottomRight},
+			{ID: "position:" + PosBottomLeft, Text: "Bottom left", On: s.OverlayPosition == PosBottomLeft},
+			{ID: "position:" + PosTopRight, Text: "Top right", On: s.OverlayPosition == PosTopRight},
+			{ID: "position:" + PosTopLeft, Text: "Top left", On: s.OverlayPosition == PosTopLeft},
+		}},
+		{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup},
+	}
+	if paired {
+		rows = append(rows, render.Row{Kind: render.RowButton, ID: "unpair", Text: "Unpair…", Detail: server})
+	} else {
+		rows = append(rows, render.Row{Kind: render.RowButton, ID: "pair", Text: "Pair with phone…"})
+	}
+	rows = append(rows, render.Row{Kind: render.RowButton, ID: "quit", Text: "Quit Sovereign"})
+	return rows
 }
 
 // repaintPanel renders the panel and hands the bitmap to the window, positioning it on first show.
@@ -141,6 +190,7 @@ func (a *app) repaintPanel() {
 		Status:      view.status,
 		Committed:   view.committed,
 		Provisional: view.provisional,
+		Rows:        a.panelRows(),
 		Info:        a.panelInfo(),
 		Error:       view.err,
 		Dark:        true,
@@ -188,8 +238,8 @@ func (a *app) panelInfo() []string {
 	return info
 }
 
-// onPanelMouse handles clicks and drags. It runs on the window thread, so it only touches the panel
-// mutex and posts work back to the window.
+// onPanelMouse handles clicks and drags. It runs on the window thread, so it never blocks: a control
+// click is dispatched to a goroutine (some actions re-arm the hotkey, which starts a thread).
 func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	a.panelMu.Lock()
 	layout := a.panelLayout
@@ -199,9 +249,7 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	switch ev.Kind {
 	case winplat.MouseDown:
 		if c, ok := layout.ControlAt(ev.X, ev.Y); ok {
-			if c.Kind == render.ControlClose {
-				a.closePanel()
-			}
+			go a.panelAction(c)
 			return
 		}
 		if layout.InHeader(ev.X, ev.Y) {
@@ -231,6 +279,30 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	}
 }
 
+// panelAction performs a control's action by id.
+func (a *app) panelAction(c render.Control) {
+	switch {
+	case c.Kind == render.ControlClose:
+		a.closePanel()
+	case strings.HasPrefix(c.ID, "mode:"):
+		a.setMode(strings.TrimPrefix(c.ID, "mode:"))
+	case strings.HasPrefix(c.ID, "insertion:"):
+		a.setInsertion(strings.TrimPrefix(c.ID, "insertion:"))
+	case strings.HasPrefix(c.ID, "position:"):
+		a.setPosition(strings.TrimPrefix(c.ID, "position:"))
+	case c.ID == "startup":
+		a.toggleStartup()
+	case c.ID == "hotkey:set":
+		a.startPanelHotkeyCapture()
+	case c.ID == "pair":
+		go a.doPair()
+	case c.ID == "unpair":
+		go a.doUnpair()
+	case c.ID == "quit":
+		a.quit()
+	}
+}
+
 // onPanelKey closes the panel on Esc. It runs on the window thread; returning true swallows the key.
 func (a *app) onPanelKey(vk uint32) bool {
 	if vk == escVKPanel {
@@ -238,6 +310,78 @@ func (a *app) onPanelKey(vk uint32) bool {
 		return true
 	}
 	return false
+}
+
+// startPanelHotkeyCapture arms the keyboard hook so the next chord the user presses becomes the
+// dictation hotkey. The main watcher is disarmed first so the pressed chord does not also fire the
+// current hotkey; it is re-armed when the capture ends.
+func (a *app) startPanelHotkeyCapture() {
+	a.mu.Lock()
+	if a.hotkeyCapture {
+		a.mu.Unlock()
+		return
+	}
+	wasArmed := a.armed
+	a.hotkeyCapture = true
+	abort := make(chan struct{})
+	a.hotkeyAbort = abort
+	a.mu.Unlock()
+
+	a.disarmHotkey()
+	a.repaintPanel()
+
+	w, err := winplat.StartHotkeyCapture()
+	if err != nil {
+		a.logf("hotkey capture failed: %v", err)
+		a.finishHotkeyCapture(wasArmed)
+		return
+	}
+	a.logf("capturing a new hotkey; press the combination")
+
+	go func() {
+		defer func() {
+			_ = w.Close()
+			a.finishHotkeyCapture(wasArmed)
+		}()
+		select {
+		case c := <-w.Captured():
+			if c.Mods == (iface.Modifiers{}) && !iface.IsFunctionKey(c.VK) {
+				a.logf("hotkey capture: %s has no modifier; keeping the current hotkey", iface.KeyName(c.VK))
+				return
+			}
+			chord := iface.NewChord(c.VK, c.Mods)
+			a.applyHotkey(chord.String())
+			a.logf("hotkey set to %s", chord)
+		case <-abort:
+			a.logf("hotkey capture cancelled")
+		case <-time.After(15 * time.Second):
+			a.logf("hotkey capture timed out; keeping the current hotkey")
+		case <-a.ctx.Done():
+		}
+	}()
+}
+
+// finishHotkeyCapture clears the capture state and restores the watcher.
+func (a *app) finishHotkeyCapture(wasArmed bool) {
+	a.mu.Lock()
+	a.hotkeyCapture = false
+	a.hotkeyAbort = nil
+	a.mu.Unlock()
+	if wasArmed {
+		a.armHotkey()
+	}
+	a.refreshPanel()
+}
+
+// cancelHotkeyCapture abandons an in-flight capture, e.g. when the panel is closed.
+func (a *app) cancelHotkeyCapture() {
+	a.mu.Lock()
+	ch := a.hotkeyAbort
+	a.hotkeyAbort = nil
+	a.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 // setLiveCommitted/provisional/error update both the pill and the panel, so the two surfaces always

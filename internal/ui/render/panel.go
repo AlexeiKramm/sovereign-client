@@ -4,7 +4,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"strings"
 
 	"golang.org/x/image/font"
 )
@@ -25,13 +24,26 @@ const (
 	panelDot      = 8.0
 	panelDotGap   = 8.0
 
-	panelLiveSz  = 14.5
-	panelLiveLH  = 19.0
-	panelLiveH   = 150.0
-	panelLiveMax = 7 // wrapped lines shown before the oldest are dropped
+	panelLiveSz  = 14.0
+	panelLiveLH  = 18.0
+	panelLiveH   = 96.0
+	panelLiveMax = 5
 
-	panelInfoSz = 12.5
-	panelInfoLH = 17.0
+	rowLabelSz  = 11.5
+	rowLabelH   = 20.0
+	rowChipsH   = 26.0
+	rowChipSz   = 12.0
+	rowChipPadX = 11.0
+	rowChipGap  = 6.0
+	rowTextSz   = 13.5
+	rowToggleH  = 30.0
+	rowSwitchW  = 34.0
+	rowSwitchH  = 18.0
+	rowButtonH  = 34.0
+	rowGap      = 4.0
+
+	panelInfoSz = 12.0
+	panelInfoLH = 16.0
 )
 
 // ControlKind identifies an interactive region of the panel.
@@ -40,20 +52,49 @@ type ControlKind int
 const (
 	// ControlClose is the window's close affordance.
 	ControlClose ControlKind = iota
-	// ControlButton is a generic pressable row/button (settings arrive in 4d-b).
-	ControlButton
+	// ControlChip is one option of a row group.
+	ControlChip
 	// ControlToggle is a boolean row.
 	ControlToggle
+	// ControlButton is a pressable row.
+	ControlButton
 )
 
 // Control is one interactive region, in the panel image's client coordinates (device pixels,
 // including the transparent shadow margin), so a mouse event maps to it directly.
 type Control struct {
-	ID      string
-	Kind    ControlKind
-	Rect    image.Rectangle
-	Label   string
-	Checked bool
+	ID   string
+	Kind ControlKind
+	Rect image.Rectangle
+}
+
+// RowKind is the kind of settings row.
+type RowKind int
+
+const (
+	// RowChips is a labelled group of mutually exclusive options.
+	RowChips RowKind = iota
+	// RowToggle is a boolean switch.
+	RowToggle
+	// RowButton is a pressable row.
+	RowButton
+)
+
+// Option is one chip in a RowChips group.
+type Option struct {
+	ID   string
+	Text string
+	On   bool
+}
+
+// Row is one settings row.
+type Row struct {
+	Kind    RowKind
+	ID      string   // RowToggle/RowButton action id
+	Text    string   // group label (RowChips) or button text (RowButton)
+	Detail  string   // right-aligned value (RowButton)
+	Options []Option // RowChips
+	On      bool     // RowToggle
 }
 
 // PanelModel is the control window's content.
@@ -62,6 +103,7 @@ type PanelModel struct {
 	Status      string
 	Committed   string
 	Provisional string
+	Rows        []Row
 	Info        []string
 	Error       bool
 	Dark        bool
@@ -76,7 +118,8 @@ type Panel struct {
 }
 
 // RenderPanel draws the control window. It reuses the pill's drawing primitives and text flow, so
-// the two surfaces look like one product.
+// the two surfaces look like one product, and returns every interactive region so the controller
+// hit-tests exactly what it drew.
 func RenderPanel(m PanelModel) (Panel, error) {
 	faceMu.Lock()
 	defer faceMu.Unlock()
@@ -102,6 +145,21 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		return Panel{}, err
 	}
 	defer bodyFace.Close()
+	labelFace, err := newFace(rowLabelSz * scale)
+	if err != nil {
+		return Panel{}, err
+	}
+	defer labelFace.Close()
+	chipFace, err := newFace(rowChipSz * scale)
+	if err != nil {
+		return Panel{}, err
+	}
+	defer chipFace.Close()
+	rowFace, err := newFace(rowTextSz * scale)
+	if err != nil {
+		return Panel{}, err
+	}
+	defer rowFace.Close()
 	infoFace, err := newFace(panelInfoSz * scale)
 	if err != nil {
 		return Panel{}, err
@@ -112,9 +170,7 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	headerH := panelHeaderH * scale
 	statusH := panelStatusH * scale
 	liveH := panelLiveH * scale
-	infoLH := panelInfoLH * scale
 	closeSz := panelClose * scale
-
 	cardW := panelWidth * scale
 	innerW := cardW - 2*pad
 
@@ -124,9 +180,17 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	}
 	info := trimInfo(m.Info)
 
+	// Measure: rows are a fixed height per kind, so the card can be sized before drawing.
+	rowH := make([]float64, len(m.Rows))
+	for i, r := range m.Rows {
+		rowH[i] = measureRow(r, scale)
+	}
 	cardH := pad + headerH + 6*scale + 1 + 10*scale + statusH + 10*scale + liveH + 12*scale
-	if n := len(info); n > 0 {
-		cardH += float64(n)*infoLH + 4*scale
+	for _, h := range rowH {
+		cardH += h + rowGap*scale
+	}
+	if len(info) > 0 {
+		cardH += 12*scale + float64(len(info))*panelInfoLH*scale + 4*scale
 	}
 	cardH += pad
 
@@ -141,7 +205,7 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	bw := panelBorder * scale
 	fillRoundRect(img, cx+bw, cy+bw, cardW-2*bw, cardH-2*bw, panelRadius*scale-bw, theme.Surface)
 
-	controls := make([]Control, 0, 2)
+	controls := make([]Control, 0, 12)
 	header := image.Rect(shadow, shadow, shadow+int(math.Round(cardW)), shadow+int(math.Round(headerH)))
 
 	// Header: title on the left, close affordance on the right.
@@ -193,14 +257,102 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		}
 	}
 
+	// Settings rows.
+	y := liveTop + liveH + 12*scale
+	left := cx + pad
+	for i, r := range m.Rows {
+		controls = append(controls, drawRow(img, r, left, y, innerW, rowH[i], shadow, scale, theme, labelFace, chipFace, rowFace)...)
+		y += rowH[i] + rowGap*scale
+	}
+
 	// Footer info lines.
-	infoTop := liveTop + liveH + 12*scale
-	for i, line := range m.Info {
+	infoTop := y + 12*scale
+	for i, line := range info {
 		drawText(img, infoFace, theme.OnSurfaceVariant,
-			cx+pad, infoTop+float64(i)*infoLH+baseline(infoFace, infoLH), line)
+			left, infoTop+float64(i)*panelInfoLH*scale+baseline(infoFace, panelInfoLH*scale), line)
 	}
 
 	return Panel{Frame: Frame{Img: img, Pad: shadow}, Controls: controls, Header: header}, nil
+}
+
+// measureRow returns the logical height of a row, scaled.
+func measureRow(r Row, scale float64) float64 {
+	switch r.Kind {
+	case RowChips:
+		return (rowLabelH + rowChipsH) * scale
+	case RowToggle:
+		return rowToggleH * scale
+	default: // RowButton
+		return rowButtonH * scale
+	}
+}
+
+// drawRow draws one settings row and returns its interactive regions (in image coordinates).
+func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float64, theme Theme,
+	labelFace, chipFace, rowFace font.Face) []Control {
+
+	switch r.Kind {
+	case RowChips:
+		drawText(img, labelFace, theme.OnSurfaceVariant, x, y+baseline(labelFace, rowLabelH*scale), r.Text)
+		chipY := y + rowLabelH*scale
+		chH := rowChipsH * scale
+		cx := x
+		var out []Control
+		for _, opt := range r.Options {
+			cw := float64(font.MeasureString(chipFace, opt.Text).Ceil()) + 2*rowChipPadX*scale
+			rect := image.Rect(
+				int(math.Round(cx)), int(math.Round(chipY)),
+				int(math.Round(cx+cw)), int(math.Round(chipY+chH)),
+			)
+			if opt.On {
+				fillRoundRect(img, cx, chipY, cw, chH, chH/2, theme.Primary)
+				drawText(img, chipFace, theme.OnPrimary,
+					cx+rowChipPadX*scale, chipY+baseline(chipFace, chH), opt.Text)
+			} else {
+				fillRoundRect(img, cx, chipY, cw, chH, chH/2, theme.Border)
+				inner := 1.0 * scale
+				fillRoundRect(img, cx+inner, chipY+inner, cw-2*inner, chH-2*inner, chH/2-inner, theme.Inset)
+				drawText(img, chipFace, theme.OnSurfaceVariant,
+					cx+rowChipPadX*scale, chipY+baseline(chipFace, chH), opt.Text)
+			}
+			out = append(out, Control{ID: opt.ID, Kind: ControlChip, Rect: rect})
+			cx += cw + rowChipGap*scale
+		}
+		return out
+
+	case RowToggle:
+		drawText(img, rowFace, theme.OnSurface, x, y+baseline(rowFace, h), r.Text)
+		swW, swH := rowSwitchW*scale, rowSwitchH*scale
+		sx := x + w - swW
+		sy := y + (h-swH)/2
+		track := theme.Border
+		knob := theme.OnSurfaceVariant
+		if r.On {
+			track = theme.Primary
+			knob = theme.OnPrimary
+		}
+		fillRoundRect(img, sx, sy, swW, swH, swH/2, track)
+		kr := (swH - 4*scale) / 2
+		kxc := sx + 2*scale + kr
+		if r.On {
+			kxc = sx + swW - 2*scale - kr
+		}
+		fillRoundRect(img, kxc-kr, sy+2*scale, kr*2, kr*2, kr, knob)
+		return []Control{{ID: r.ID, Kind: ControlToggle,
+			Rect: image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)))}}
+
+	default: // RowButton
+		fillRoundRect(img, x, y, w, h, 10*scale, theme.Border)
+		inner := 1.0 * scale
+		fillRoundRect(img, x+inner, y+inner, w-2*inner, h-2*inner, 10*scale-inner, theme.Inset)
+		drawText(img, rowFace, theme.OnSurface, x+12*scale, y+baseline(rowFace, h), r.Text)
+		if r.Detail != "" {
+			dw := float64(font.MeasureString(rowFace, r.Detail).Ceil())
+			drawText(img, rowFace, theme.OnSurfaceVariant, x+w-12*scale-dw, y+baseline(rowFace, h), r.Detail)
+		}
+		return []Control{{ID: r.ID, Kind: ControlButton,
+			Rect: image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)))}}
+	}
 }
 
 // drawClose draws an "×" centred in r.
@@ -239,7 +391,7 @@ func (p Panel) InHeader(x, y int) bool {
 func trimInfo(lines []string) []string {
 	out := lines[:0:0]
 	for _, l := range lines {
-		if strings.TrimSpace(l) != "" {
+		if l != "" {
 			out = append(out, l)
 		}
 	}

@@ -38,9 +38,6 @@ const (
 // DefaultHotkey is the hotkey bound until the user picks another.
 const DefaultHotkey = "Ctrl+Alt+Space"
 
-// HotkeyPresets are the bindings offered in the tray; the user can also capture a custom one.
-var HotkeyPresets = []string{"Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Alt+D", "F9"}
-
 var (
 	dictationModes   = []string{ModeAuto, ModeHold, ModeToggle}
 	insertions       = []string{InsertPaste, InsertType}

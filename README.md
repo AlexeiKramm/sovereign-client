@@ -9,8 +9,8 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
 > latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
 > pairing, settings, single-instance, autostart), the global hold/toggle hotkeys with `SendInput`
-> injection, the floating pill overlay, and the control-window shell are in. Moving the settings
-> from the tray menu into that window (Chunk 4d-b) is next.
+> injection, the floating pill overlay, and the control window — which holds the settings. The
+> remaining work is Chunk 8b (surfacing the phone's availability in the pill) and polishing.
 
 ## Where the docs live
 
@@ -55,16 +55,17 @@ go run ./cmd/sovereign-desktop
 go run ./cmd/sovereign-desktop -tray -addr 192.168.1.5:8765   # skip discovery
 ```
 
-The tray menu carries: the live state, a 5-second **Test dictation**, **Pair with phone…** /
-**Unpair…**, the dictation mode, the hotkey (presets plus **Set custom hotkey…**), the insertion
-method, the overlay position, and **Start with Windows**.
+The tray menu is deliberately small: the live state, a 5-second **Test dictation**, **Pair with
+phone…** (before pairing) and **Quit**. Left-clicking the icon — or **Open control panel** — opens
+the control window, which holds the settings (dictation mode, hotkey, insertion method, overlay
+position, **Start with Windows**, unpair and quit).
 
 ## Dictating
 
-With the phone connected, use the hotkey (default `Ctrl+Alt+Space`, rebindable via **Hotkey → Set
-custom hotkey…**). The default **auto** mode uses one key for both gestures: a quick **tap** starts
-dictation and leaves it running (tap again to stop), while **holding** records until you release.
-`Hold to talk` and `Press to toggle` remain selectable modes.
+With the phone connected, use the hotkey (default `Ctrl+Alt+Space`, rebindable from the control
+window's **Set custom hotkey…**). The default **auto** mode uses one key for both gestures: a quick
+**tap** starts dictation and leaves it running (tap again to stop), while **holding** records until
+you release. `Hold to talk` and `Press to toggle` remain selectable modes.
 
 While you speak, a floating **pill** appears at the corner chosen under **Overlay position** (bottom
 right by default). It shows the settled text in white and the live tail of the unit still being
@@ -75,9 +76,11 @@ click-through, never takes focus from the field you are dictating into, and is d
 
 **The control window** opens on a left click of the tray icon (or **Open control panel** in its
 menu) — systray reports a single tap, not a double-click. It shows the same live transcript in a
-larger, focusable window, plus the connection status, the last utterance's ASR/cleanup timings, the
-link RTT and a session counter. Drag it by its header; close it with the × or Esc. Closing it leaves
-the tray running. (Moving the tray's settings into this window is the next chunk.)
+larger, focusable window plus the connection status, the last utterance's ASR/cleanup timings, the
+link RTT and a session counter — and it is where every setting lives: dictation mode, **Set custom
+hotkey…** (press the combination you want), insertion method, overlay position, **Start with
+Windows**, pair/unpair, and **Quit**. Drag it by its header; close it with the × or Esc. Closing it
+leaves the tray running.
 
 The finished block is inserted at the cursor of the window you started in. Insertion defaults to
 **paste** — one Ctrl+V, fast and atomic at any length — with the clipboard restored afterwards; set

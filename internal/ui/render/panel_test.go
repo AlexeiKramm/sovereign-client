@@ -89,3 +89,54 @@ func TestPanelControlAtEmpty(t *testing.T) {
 		t.Fatal("InHeader(5,5) = false on a 10x10 header")
 	}
 }
+
+// TestRenderPanelRowsControls checks that every settings control becomes a hit-testable region with
+// its id, at the rect it was drawn at.
+func TestRenderPanelRowsControls(t *testing.T) {
+	p, err := RenderPanel(PanelModel{
+		Title:  "Sovereign",
+		Status: "Ready",
+		Rows: []Row{
+			{Kind: RowChips, Text: "Mode", Options: []Option{
+				{ID: "mode:auto", Text: "Auto", On: true},
+				{ID: "mode:hold", Text: "Hold"},
+			}},
+			{Kind: RowToggle, ID: "startup", Text: "Start with Windows", On: true},
+			{Kind: RowButton, ID: "quit", Text: "Quit"},
+		},
+		Scale: 1,
+	})
+	if err != nil {
+		t.Fatalf("RenderPanel: %v", err)
+	}
+	want := []string{"close", "mode:auto", "mode:hold", "startup", "quit"}
+	for _, id := range want {
+		c, ok := controlByID(p, id)
+		if !ok {
+			t.Fatalf("no control with id %q; got %v", id, controlIDs(p))
+		}
+		// The centre of the control must resolve back to it.
+		cx, cy := c.Rect.Min.X+c.Rect.Dx()/2, c.Rect.Min.Y+c.Rect.Dy()/2
+		got, ok := p.ControlAt(cx, cy)
+		if !ok || got.ID != id {
+			t.Fatalf("ControlAt(centre of %q) = %q, %v", id, got.ID, ok)
+		}
+	}
+}
+
+func controlByID(p Panel, id string) (Control, bool) {
+	for _, c := range p.Controls {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return Control{}, false
+}
+
+func controlIDs(p Panel) []string {
+	out := make([]string, 0, len(p.Controls))
+	for _, c := range p.Controls {
+		out = append(out, c.ID)
+	}
+	return out
+}

@@ -10,7 +10,8 @@ type Theme struct {
 	Border           color.RGBA // 1px hairline around the card
 	OnSurface        color.RGBA // settled text — the phone's near-white
 	OnSurfaceVariant color.RGBA // live tail + status label — the phone's grey
-	Primary          color.RGBA // status dot / accent
+	Primary          color.RGBA // status dot / accent / selected control
+	OnPrimary        color.RGBA // text on a filled (selected) control
 	Error            color.RGBA // status dot + label on failure
 	Shadow           color.RGBA // drop shadow under the card
 }
@@ -23,6 +24,7 @@ var DarkTheme = Theme{
 	OnSurface:        premul(0xEA, 0xE0, 0xE7, 0xFF),
 	OnSurfaceVariant: premul(0xCC, 0xC2, 0xCE, 0xFF),
 	Primary:          premul(0xD0, 0xBC, 0xFF, 0xFF),
+	OnPrimary:        premul(0x3A, 0x2A, 0x5C, 0xFF),
 	Error:            premul(0xFF, 0xB4, 0xAB, 0xFF),
 	Shadow:           premul(0x00, 0x00, 0x00, 0x50),
 }
@@ -35,6 +37,7 @@ var LightTheme = Theme{
 	OnSurface:        premul(0x2B, 0x26, 0x22, 0xFF),
 	OnSurfaceVariant: premul(0x4E, 0x45, 0x3C, 0xFF),
 	Primary:          premul(0x6D, 0x4F, 0xA8, 0xFF),
+	OnPrimary:        premul(0xFF, 0xFF, 0xFF, 0xFF),
 	Error:            premul(0xBA, 0x1A, 0x1A, 0xFF),
 	Shadow:           premul(0x00, 0x00, 0x00, 0x40),
 }
