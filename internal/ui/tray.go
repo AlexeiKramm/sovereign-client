@@ -63,17 +63,20 @@ type app struct {
 	hotkey     *winplat.HotkeyWatcher
 	armed      bool
 
-	mStatus   *systray.MenuItem
-	mTest     *systray.MenuItem
-	mPair     *systray.MenuItem
-	mUnpair   *systray.MenuItem
-	mHold     *systray.MenuItem
-	mToggle   *systray.MenuItem
-	mFallback *systray.MenuItem
-	mStartup  *systray.MenuItem
-	mQuit     *systray.MenuItem
-	hotkeys   map[string]*systray.MenuItem
-	positions map[string]*systray.MenuItem
+	mStatus    *systray.MenuItem
+	mTest      *systray.MenuItem
+	mPair      *systray.MenuItem
+	mUnpair    *systray.MenuItem
+	mAuto      *systray.MenuItem
+	mHold      *systray.MenuItem
+	mToggle    *systray.MenuItem
+	mHotkey    *systray.MenuItem
+	mSetHotkey *systray.MenuItem
+	mStartup   *systray.MenuItem
+	mQuit      *systray.MenuItem
+	hotkeys    map[string]*systray.MenuItem
+	insertion  map[string]*systray.MenuItem
+	positions  map[string]*systray.MenuItem
 }
 
 func (a *app) onReady() {
@@ -116,18 +119,23 @@ func (a *app) buildMenu(paired bool) {
 	a.mUnpair = systray.AddMenuItem("Unpair…", "Delete the stored token and pin")
 
 	systray.AddSeparator()
-	mode := systray.AddMenuItem("Dictation mode", "Hold-to-talk or press-to-toggle")
+	mode := systray.AddMenuItem("Dictation mode", "Tap to toggle, hold to talk")
+	a.mAuto = mode.AddSubMenuItemCheckbox("Tap to toggle, hold to talk", "", a.settings.Mode == ModeAuto)
 	a.mHold = mode.AddSubMenuItemCheckbox("Hold to talk", "", a.settings.Mode == ModeHold)
 	a.mToggle = mode.AddSubMenuItemCheckbox("Press to toggle", "", a.settings.Mode == ModeToggle)
 
-	hotkey := systray.AddMenuItem("Hotkey", "The global dictation hotkey")
+	a.mHotkey = systray.AddMenuItem(hotkeyTitle(a.settings.Hotkey), "The global dictation hotkey")
 	a.hotkeys = map[string]*systray.MenuItem{}
 	for _, p := range HotkeyPresets {
-		a.hotkeys[p] = hotkey.AddSubMenuItemCheckbox(p, "", p == a.settings.Hotkey)
+		a.hotkeys[p] = a.mHotkey.AddSubMenuItemCheckbox(p, "", p == a.settings.Hotkey)
 	}
+	a.mSetHotkey = a.mHotkey.AddSubMenuItem("Set custom hotkey…", "Press the combination you want")
 
-	a.mFallback = systray.AddMenuItemCheckbox("Clipboard fallback for blocked apps",
-		"Paste instead when SendInput is refused (elevated windows)", a.settings.InjectionFallback)
+	insert := systray.AddMenuItem("Insertion", "How the finished text is written")
+	a.insertion = map[string]*systray.MenuItem{}
+	for _, m := range insertions {
+		a.insertion[m] = insert.AddSubMenuItemCheckbox(insertionLabel(m), "", m == a.settings.Insertion)
+	}
 
 	pos := systray.AddMenuItem("Overlay position", "Where the pill appears on screen")
 	a.positions = map[string]*systray.MenuItem{}
@@ -149,14 +157,19 @@ func (a *app) buildMenu(paired bool) {
 	a.onClicks(a.mTest, func() { go a.testDictation() })
 	a.onClicks(a.mPair, func() { go a.doPair() })
 	a.onClicks(a.mUnpair, func() { go a.doUnpair() })
+	a.onClicks(a.mAuto, func() { a.setMode(ModeAuto) })
 	a.onClicks(a.mHold, func() { a.setMode(ModeHold) })
 	a.onClicks(a.mToggle, func() { a.setMode(ModeToggle) })
-	a.onClicks(a.mFallback, func() { a.setFallback(!a.settingsFallback()) })
+	a.onClicks(a.mSetHotkey, func() { go a.doSetHotkey() })
 	a.onClicks(a.mStartup, func() { a.toggleStartup() })
 	a.onClicks(a.mQuit, a.quit)
 	for p, item := range a.hotkeys {
 		p, item := p, item
-		a.onClicks(item, func() { a.setHotkey(p) })
+		a.onClicks(item, func() { a.applyHotkey(p) })
+	}
+	for m, item := range a.insertion {
+		m, item := m, item
+		a.onClicks(item, func() { a.setInsertion(m) })
 	}
 	for p, item := range a.positions {
 		p, item := p, item
@@ -399,31 +412,98 @@ func (a *app) isDictating() bool {
 	return a.dictating
 }
 
-// onHotkeyEvent maps chord edges to start/stop per the configured mode.
-func (a *app) onHotkeyEvent(ev iface.Event) {
-	a.mu.Lock()
-	toggle := a.settings.Mode == ModeToggle
-	a.mu.Unlock()
+// tapWindow is how long a chord may be held before a release is treated as "hold" rather than
+// "tap". Short enough that a deliberate hold registers almost immediately, long enough that a
+// normal tap is not mistaken for one.
+const tapWindow = 250 * time.Millisecond
 
-	if toggle {
-		if ev == iface.Press { // RegisterHotKey reports Press only
-			if a.isDictating() {
-				a.stopDictation()
-			} else {
-				a.startDictation()
+// hotkeyLoop dispatches the watcher's chord edges for the configured mode. It runs for the lifetime
+// of one armed watcher; a mode or chord change disarms and re-arms (see rearmHotkey).
+func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string) {
+	switch mode {
+	case ModeToggle:
+		for ev := range w.Events() {
+			if ev == iface.Press { // RegisterHotKey reports Press only
+				a.toggleDictation()
 			}
 		}
-		return
+	case ModeHold:
+		for ev := range w.Events() {
+			switch ev {
+			case iface.Press:
+				if !a.isDictating() {
+					a.startDictation()
+				}
+			case iface.Release:
+				if a.isDictating() {
+					a.stopDictation()
+				}
+			}
+		}
+	default: // ModeAuto
+		a.smartHotkeyLoop(w)
 	}
-	switch ev {
-	case iface.Press:
-		if !a.isDictating() {
-			a.startDictation()
+}
+
+// smartHotkeyLoop implements tap-to-toggle + hold-to-talk on one hotkey: dictation starts on the
+// press either way, and the tap window only decides whether the release stops it. The timer lives
+// here so the SmartMode machine is driven from a single goroutine.
+func (a *app) smartHotkeyLoop(w *winplat.HotkeyWatcher) {
+	sm := &SmartMode{}
+	var timer *time.Timer
+	var tick <-chan time.Time
+	cancel := func() {
+		if timer != nil {
+			timer.Stop()
+			timer = nil
 		}
-	case iface.Release:
-		if a.isDictating() {
-			a.stopDictation()
+		tick = nil
+	}
+	defer cancel()
+
+	for {
+		select {
+		case ev, ok := <-w.Events():
+			if !ok {
+				return
+			}
+			switch ev {
+			case iface.Press:
+				act, arm := sm.Press()
+				a.applyAction(act)
+				if arm {
+					cancel()
+					timer = time.NewTimer(tapWindow)
+					tick = timer.C
+				}
+			case iface.Release:
+				act, stop := sm.Release()
+				if stop {
+					cancel()
+				}
+				a.applyAction(act)
+			}
+		case <-tick:
+			cancel()
+			sm.TimerFired()
 		}
+	}
+}
+
+func (a *app) applyAction(act Action) {
+	switch act {
+	case ActionStart:
+		a.startDictation()
+	case ActionStop:
+		a.stopDictation()
+	}
+}
+
+func (a *app) toggleDictation() {
+	if a.isDictating() {
+		a.stopDictation()
+	} else {
+		a.startDictation()
 	}
 }
 
@@ -452,34 +532,48 @@ func (a *app) stopDictation() {
 	}
 }
 
-// inject types the finished block. Focus is verified in InjectText; if injection is refused and the
-// user opted in, it falls back to a clipboard-restore paste; otherwise the text is left on the
-// clipboard so nothing is silently dropped (D-120).
+// inject writes the finished block with the configured method, falling back to the other method so
+// text is never dropped silently. Focus is verified before anything is written. Paste is the default
+// because it is fast and atomic for any length; typing leaves the clipboard untouched (D-120 amended
+// 2026-10-07).
 func (a *app) inject(text string) {
 	a.mu.Lock()
 	target := a.target
+	insertion := a.settings.Insertion
 	a.mu.Unlock()
 
-	if err := winplat.InjectText(target, text); err == nil {
-		a.logf("injected %d chars", len(text))
+	if err := a.insert(insertion, target, text); err == nil {
+		a.logf("inserted %d chars via %s", len(text), insertion)
 		return
 	} else {
-		a.logf("injection failed: %v", err)
+		a.logf("insertion via %s failed: %v", insertion, err)
 	}
 
-	if a.settingsFallback() {
-		if err := winplat.PasteText(text); err != nil {
-			a.logf("clipboard fallback failed: %v", err)
-			a.setState(StateError, "injection blocked")
-			return
-		}
-		a.logf("injected via clipboard fallback")
-		return
+	other := InsertType
+	if insertion == InsertType {
+		other = InsertPaste
 	}
+	if err := a.insert(other, target, text); err == nil {
+		a.logf("inserted %d chars via %s (fallback)", len(text), other)
+		return
+	} else {
+		a.logf("insertion via %s failed: %v", other, err)
+	}
+
 	if err := winplat.CopyText(text); err != nil {
 		a.logf("could not place text on the clipboard: %v", err)
 	}
-	a.setState(StateError, "injection blocked; text on clipboard")
+	a.setState(StateError, "insertion blocked; text on clipboard")
+}
+
+func (a *app) insert(method string, target uintptr, text string) error {
+	if target != 0 && winplat.ForegroundWindow() != target {
+		return winplat.ErrFocusChanged
+	}
+	if method == InsertType {
+		return winplat.InjectText(0, text) // focus already verified
+	}
+	return winplat.PasteText(text)
 }
 
 // armHotkey starts the global hotkey watcher for the configured chord and mode. It is idempotent.
@@ -490,14 +584,14 @@ func (a *app) armHotkey() {
 		return
 	}
 	chord, err := iface.ParseHotkey(a.settings.Hotkey)
-	toggle := a.settings.Mode == ModeToggle
+	mode := a.settings.Mode
 	a.mu.Unlock()
 	if err != nil {
 		a.logf("hotkey %q is invalid: %v", a.settings.Hotkey, err)
 		return
 	}
 
-	w, err := winplat.StartHotkey(chord, toggle)
+	w, err := winplat.StartHotkey(chord, mode == ModeToggle)
 	if err != nil {
 		a.logf("hotkey unavailable: %v", err)
 		a.setState(StateError, "hotkey unavailable")
@@ -507,14 +601,8 @@ func (a *app) armHotkey() {
 	a.hotkey = w
 	a.armed = true
 	a.mu.Unlock()
-	a.logf("hotkey armed: %s (toggle=%v)", chord, toggle)
-	go a.hotkeyLoop(w)
-}
-
-func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher) {
-	for ev := range w.Events() {
-		a.onHotkeyEvent(ev)
-	}
+	a.logf("hotkey armed: %s (mode=%s)", chord, mode)
+	go a.hotkeyLoop(w, mode)
 }
 
 func (a *app) disarmHotkey() {
@@ -615,31 +703,38 @@ func (a *app) setMode(m string) {
 	a.settings.Mode = m
 	s := a.settings
 	a.mu.Unlock()
-	if m == ModeHold {
-		a.mHold.Check()
-		a.mToggle.Uncheck()
-	} else {
-		a.mToggle.Check()
-		a.mHold.Uncheck()
+	setChecked(a.mAuto, m == ModeAuto)
+	setChecked(a.mHold, m == ModeHold)
+	setChecked(a.mToggle, m == ModeToggle)
+	a.persist(s)
+	a.rearmHotkey()
+}
+
+// applyHotkey stores a hotkey (a preset or a captured custom one), updates the menu, and re-arms.
+func (a *app) applyHotkey(spec string) {
+	a.mu.Lock()
+	a.settings.Hotkey = spec
+	s := a.settings
+	a.mu.Unlock()
+	for k, item := range a.hotkeys {
+		setChecked(item, k == spec)
+	}
+	if a.mHotkey != nil {
+		a.mHotkey.SetTitle(hotkeyTitle(spec))
 	}
 	a.persist(s)
 	a.rearmHotkey()
 }
 
-func (a *app) setHotkey(p string) {
+func (a *app) setInsertion(m string) {
 	a.mu.Lock()
-	a.settings.Hotkey = p
+	a.settings.Insertion = m
 	s := a.settings
 	a.mu.Unlock()
-	for k, item := range a.hotkeys {
-		if k == p {
-			item.Check()
-		} else {
-			item.Uncheck()
-		}
+	for k, item := range a.insertion {
+		setChecked(item, k == m)
 	}
 	a.persist(s)
-	a.rearmHotkey()
 }
 
 func (a *app) setPosition(p string) {
@@ -648,32 +743,43 @@ func (a *app) setPosition(p string) {
 	s := a.settings
 	a.mu.Unlock()
 	for k, item := range a.positions {
-		if k == p {
-			item.Check()
-		} else {
-			item.Uncheck()
+		setChecked(item, k == p)
+	}
+	a.persist(s)
+}
+
+// doSetHotkey captures the next key combination the user presses and binds it. The main watcher is
+// disarmed first so the pressed chord does not also fire the current hotkey.
+func (a *app) doSetHotkey() {
+	winplat.InfoBox("Set hotkey",
+		"Click OK, then press the key combination you want to dictate with.\n\n"+
+			"Use at least one modifier (Ctrl/Alt/Shift/Win), or an F-key on its own.")
+
+	a.disarmHotkey()
+	w, err := winplat.StartHotkeyCapture()
+	if err != nil {
+		a.logf("hotkey capture failed: %v", err)
+		a.armHotkey()
+		return
+	}
+	defer func() {
+		_ = w.Close()
+		a.armHotkey()
+	}()
+
+	select {
+	case c := <-w.Captured():
+		if c.Mods == (iface.Modifiers{}) && !iface.IsFunctionKey(c.VK) {
+			winplat.InfoBox("Set hotkey", "That key has no modifier, so it would be captured everywhere.\n\nUse at least one modifier, or an F-key.")
+			return
 		}
+		chord := iface.NewChord(c.VK, c.Mods)
+		a.applyHotkey(chord.String())
+		a.logf("hotkey set to %s", chord)
+	case <-time.After(15 * time.Second):
+		winplat.InfoBox("Set hotkey", "No hotkey was captured; keeping the current one.")
+	case <-a.ctx.Done():
 	}
-	a.persist(s)
-}
-
-func (a *app) setFallback(v bool) {
-	a.mu.Lock()
-	a.settings.InjectionFallback = v
-	s := a.settings
-	a.mu.Unlock()
-	if v {
-		a.mFallback.Check()
-	} else {
-		a.mFallback.Uncheck()
-	}
-	a.persist(s)
-}
-
-func (a *app) settingsFallback() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.settings.InjectionFallback
 }
 
 func (a *app) toggleStartup() {
@@ -748,6 +854,24 @@ func posLabel(p string) string {
 		return "Top left"
 	default:
 		return "Bottom right"
+	}
+}
+
+func insertionLabel(m string) string {
+	if m == InsertType {
+		return "Type (keystrokes)"
+	}
+	return "Paste (fast)"
+}
+
+func hotkeyTitle(spec string) string { return "Hotkey: " + spec }
+
+// setChecked is Check/Uncheck by value, for the radio-style menu groups.
+func setChecked(item *systray.MenuItem, checked bool) {
+	if checked {
+		item.Check()
+	} else {
+		item.Uncheck()
 	}
 }
 

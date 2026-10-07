@@ -6,12 +6,25 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 )
 
-// Dictation trigger modes (PLAN.md §3): hold-to-talk or press-to-toggle.
+// Dictation trigger modes.
 const (
+	// ModeAuto is the default: a tap toggles dictation on/off, a hold records until release — both
+	// on the same hotkey.
+	ModeAuto   = "auto"
 	ModeHold   = "hold"
 	ModeToggle = "toggle"
+)
+
+// Insertion methods for the finalized block.
+const (
+	// InsertPaste sets the clipboard and sends one Ctrl+V — fast and atomic for any length.
+	InsertPaste = "paste"
+	// InsertType types the text with SendInput/KEYEVENTF_UNICODE, leaving the clipboard untouched.
+	InsertType = "type"
 )
 
 // Overlay anchor positions (consumed by the pill overlay). The user picks one from the tray.
@@ -22,44 +35,52 @@ const (
 	PosTopLeft     = "top-left"
 )
 
-// DefaultHotkey is the hotkey bound until the user picks another preset.
+// DefaultHotkey is the hotkey bound until the user picks another.
 const DefaultHotkey = "Ctrl+Alt+Space"
 
-// HotkeyPresets are the bindings offered in the tray. Free-form capture arrives with the keyboard
-// hook; for now the user chooses from this fixed set.
+// HotkeyPresets are the bindings offered in the tray; the user can also capture a custom one.
 var HotkeyPresets = []string{"Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Alt+D", "F9"}
 
-var overlayPositions = []string{PosBottomRight, PosBottomLeft, PosTopRight, PosTopLeft}
+var (
+	dictationModes   = []string{ModeAuto, ModeHold, ModeToggle}
+	insertions       = []string{InsertPaste, InsertType}
+	overlayPositions = []string{PosBottomRight, PosBottomLeft, PosTopRight, PosTopLeft}
+)
 
 // Settings is the tray app's user configuration, persisted as JSON beside the identity and
 // credentials. It holds no secret, so unlike Credentials it is written in the clear.
 type Settings struct {
-	Mode              string `json:"mode"`
-	Hotkey            string `json:"hotkey"`
-	InjectionFallback bool   `json:"injectionFallback"`
-	OverlayPosition   string `json:"overlayPosition"`
+	Mode            string `json:"mode"`
+	Hotkey          string `json:"hotkey"`
+	Insertion       string `json:"insertion"`
+	OverlayPosition string `json:"overlayPosition"`
 }
 
 // DefaultSettings is the configuration used before the user changes anything.
 func DefaultSettings() Settings {
 	return Settings{
-		Mode:            ModeHold,
+		Mode:            ModeAuto,
 		Hotkey:          DefaultHotkey,
+		Insertion:       InsertPaste,
 		OverlayPosition: PosBottomRight,
 	}
 }
 
 // Normalize replaces empty or unknown fields with their defaults, so a settings file written by an
-// older or newer build can never put the app into an unrepresentable state.
+// older or newer build can never put the app into an unrepresentable state. A hotkey that no longer
+// parses falls back to the default rather than leaving the user with dead input.
 func (s *Settings) Normalize() {
-	if s.Mode != ModeHold && s.Mode != ModeToggle {
-		s.Mode = ModeHold
+	if !contains(dictationModes, s.Mode) {
+		s.Mode = ModeAuto
 	}
-	if !contains(HotkeyPresets, s.Hotkey) {
-		s.Hotkey = DefaultHotkey
+	if !contains(insertions, s.Insertion) {
+		s.Insertion = InsertPaste
 	}
 	if !contains(overlayPositions, s.OverlayPosition) {
 		s.OverlayPosition = PosBottomRight
+	}
+	if _, err := iface.ParseHotkey(s.Hotkey); err != nil {
+		s.Hotkey = DefaultHotkey
 	}
 }
 

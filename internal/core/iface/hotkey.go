@@ -114,6 +114,12 @@ func ParseHotkey(spec string) (Chord, error) {
 
 func parseKey(tok string) (uint32, string, error) {
 	upper := strings.ToUpper(tok)
+	switch upper {
+	case "ESCAPE":
+		upper = "ESC"
+	case "RETURN":
+		upper = "ENTER"
+	}
 	if len(upper) == 1 {
 		ch := upper[0]
 		switch {
@@ -123,17 +129,16 @@ func parseKey(tok string) (uint32, string, error) {
 			return uint32(ch), string(ch), nil
 		}
 	}
-	switch upper {
-	case "SPACE":
-		return 0x20, "Space", nil
-	case "ENTER", "RETURN":
-		return 0x0D, "Enter", nil
-	case "TAB":
-		return 0x09, "Tab", nil
-	case "ESC", "ESCAPE":
-		return 0x1B, "Esc", nil
-	case "BACKSPACE":
-		return 0x08, "Backspace", nil
+	for _, nk := range namedKeys {
+		if upper == strings.ToUpper(nk.name) {
+			return nk.vk, nk.name, nil
+		}
+	}
+	// KeyName's fallback form, so any virtual key round-trips through its string.
+	if strings.HasPrefix(upper, "VK_") {
+		if v, err := strconv.ParseUint(upper[3:], 16, 32); err == nil {
+			return uint32(v), fmt.Sprintf("VK_%02X", v), nil
+		}
 	}
 	if len(upper) >= 2 && upper[0] == 'F' {
 		if n, err := strconv.Atoi(upper[1:]); err == nil && n >= 1 && n <= 24 {
@@ -141,6 +146,66 @@ func parseKey(tok string) (uint32, string, error) {
 		}
 	}
 	return 0, "", fmt.Errorf("unknown key %q", tok)
+}
+
+// namedKeys are the non-printable keys a hotkey may use, shared by ParseHotkey and KeyName so a
+// captured hotkey round-trips through its own string form.
+var namedKeys = []struct {
+	name string
+	vk   uint32
+}{
+	{"Space", 0x20},
+	{"Enter", 0x0D},
+	{"Tab", 0x09},
+	{"Esc", 0x1B},
+	{"Backspace", 0x08},
+	{"Left", 0x25},
+	{"Up", 0x26},
+	{"Right", 0x27},
+	{"Down", 0x28},
+	{"Home", 0x24},
+	{"End", 0x23},
+	{"PageUp", 0x21},
+	{"PageDown", 0x22},
+	{"Insert", 0x2D},
+	{"Delete", 0x2E},
+}
+
+// KeyName is the canonical name for a Windows virtual-key code, the inverse of the key half of
+// ParseHotkey. Unknown codes fall back to a VK_xx spelling.
+func KeyName(vk uint32) string {
+	switch {
+	case vk >= 'A' && vk <= 'Z', vk >= '0' && vk <= '9':
+		return string(rune(vk))
+	case vk >= 0x70 && vk <= 0x87:
+		return fmt.Sprintf("F%d", vk-0x70+1)
+	}
+	for _, nk := range namedKeys {
+		if nk.vk == vk {
+			return nk.name
+		}
+	}
+	return fmt.Sprintf("VK_%02X", vk)
+}
+
+// NewChord builds a Chord from a captured virtual key and modifier set.
+func NewChord(vk uint32, mods Modifiers) Chord {
+	return Chord{Mods: mods, VK: vk, Key: KeyName(vk)}
+}
+
+// IsFunctionKey reports whether vk is an F1–F24 key, which — unlike a bare letter — is safe to bind
+// without a modifier.
+func IsFunctionKey(vk uint32) bool { return vk >= 0x70 && vk <= 0x87 }
+
+// IsModifierVK reports whether vk is a modifier key, which must never be captured as the main key.
+func IsModifierVK(vk uint32) bool {
+	switch vk {
+	case 0x10, 0x11, 0x12, // SHIFT, CONTROL, MENU (generic)
+		0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, // L/R SHIFT, CONTROL, MENU
+		0x5B, 0x5C: // LWIN, RWIN
+		return true
+	}
+	return false
 }
 
 // Detector turns a stream of raw key events into chord Press/Release edges. Feeding it every key

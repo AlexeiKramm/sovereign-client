@@ -19,6 +19,12 @@ var (
 // range terminates and no hotkeys are ever delivered.
 type HotkeyWatcher struct{ events chan iface.Event }
 
+// Captured mirrors the Windows capture result off-platform.
+type Captured struct {
+	VK   uint32
+	Mods iface.Modifiers
+}
+
 // StartHotkey returns an inert watcher off Windows.
 func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
 	ch := make(chan iface.Event)
@@ -26,8 +32,18 @@ func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
 	return &HotkeyWatcher{events: ch}, nil
 }
 
+// StartHotkeyCapture returns an inert capture watcher off Windows.
+func StartHotkeyCapture() (*HotkeyWatcher, error) {
+	ch := make(chan iface.Event)
+	close(ch)
+	return &HotkeyWatcher{events: ch}, nil
+}
+
 // Events returns an already-closed channel.
 func (w *HotkeyWatcher) Events() <-chan iface.Event { return w.events }
+
+// Captured returns a nil channel off Windows.
+func (w *HotkeyWatcher) Captured() <-chan Captured { return nil }
 
 // Close is a no-op off Windows.
 func (w *HotkeyWatcher) Close() error { return nil }

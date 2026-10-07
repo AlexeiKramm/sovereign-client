@@ -78,3 +78,40 @@ func TestDetectorModifierReleaseEndsHold(t *testing.T) {
 		t.Fatal("detector still reports held after modifier release")
 	}
 }
+
+func TestKeyNameRoundTrip(t *testing.T) {
+	// Every name KeyName produces must parse back to the same virtual key, so a captured hotkey
+	// survives being stored as a string.
+	for _, vk := range []uint32{0x41, 0x5A, 0x30, 0x39, 0x70, 0x87, 0x20, 0x0D, 0x25, 0x2E, 0x5B} {
+		name := KeyName(vk)
+		chord, err := ParseHotkey("Ctrl+" + name)
+		if err != nil {
+			t.Errorf("ParseHotkey(Ctrl+%s) from vk %#x: %v", name, vk, err)
+			continue
+		}
+		if chord.VK != vk {
+			t.Errorf("round trip vk %#x -> %q -> %#x", vk, name, chord.VK)
+		}
+	}
+}
+
+func TestNewChordString(t *testing.T) {
+	got := NewChord(0x4A, Modifiers{Ctrl: true, Shift: true})
+	if got.String() != "Ctrl+Shift+J" {
+		t.Errorf("NewChord(0x4A, ctrl+shift) = %q", got.String())
+	}
+}
+
+func TestFunctionAndModifierKeys(t *testing.T) {
+	if !IsFunctionKey(0x70) || !IsFunctionKey(0x87) || IsFunctionKey(0x41) {
+		t.Error("IsFunctionKey is wrong")
+	}
+	for _, vk := range []uint32{0x10, 0x11, 0x12, 0xA0, 0xA2, 0x5B, 0x5C} {
+		if !IsModifierVK(vk) {
+			t.Errorf("IsModifierVK(%#x) = false", vk)
+		}
+	}
+	if IsModifierVK(0x41) {
+		t.Error("IsModifierVK('A') = true")
+	}
+}

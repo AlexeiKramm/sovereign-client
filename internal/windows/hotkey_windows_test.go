@@ -66,3 +66,38 @@ func TestInjectTextAccepted(t *testing.T) {
 		t.Fatalf("InjectText: %v", err)
 	}
 }
+
+// TestHotkeyCaptureViaInjectedInput proves the capture path: a synthesized chord is reported with the
+// key and the modifiers held at that instant. Opt-in for the same reasons as the round-trip test.
+func TestHotkeyCaptureViaInjectedInput(t *testing.T) {
+	if os.Getenv("SOVEREIGN_TEST_INPUT") == "" {
+		t.Skip("set SOVEREIGN_TEST_INPUT=1 to run the input-injection test")
+	}
+	w, err := StartHotkeyCapture()
+	if err != nil {
+		t.Fatalf("StartHotkeyCapture: %v", err)
+	}
+	defer w.Close()
+
+	time.Sleep(150 * time.Millisecond)
+
+	const f9 = 0x78
+	if err := send([]input{
+		vkInput(vkControl, false), vkInput(vkShift, false), vkInput(f9, false),
+		vkInput(f9, true), vkInput(vkShift, true), vkInput(vkControl, true),
+	}); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	select {
+	case c := <-w.Captured():
+		if c.VK != f9 {
+			t.Fatalf("captured vk %#x, want %#x", c.VK, f9)
+		}
+		if !c.Mods.Ctrl || !c.Mods.Shift || c.Mods.Alt || c.Mods.Win {
+			t.Fatalf("captured mods %+v, want Ctrl+Shift only", c.Mods)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for a captured chord")
+	}
+}

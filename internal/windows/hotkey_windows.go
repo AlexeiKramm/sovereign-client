@@ -14,6 +14,13 @@ import (
 	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 )
 
+// Captured is a chord read during hotkey capture: the non-modifier key plus the modifiers held when
+// it was pressed.
+type Captured struct {
+	VK   uint32
+	Mods iface.Modifiers
+}
+
 // HotkeyWatcher watches a global hotkey. In hold mode it installs a WH_KEYBOARD_LL hook and reports
 // both edges of the chord; in toggle mode it uses RegisterHotKey and reports Press only. A single
 // dedicated OS thread owns the hook/registration and runs the message pump, and the callback only
@@ -22,11 +29,13 @@ import (
 type HotkeyWatcher struct {
 	chord    iface.Chord
 	toggle   bool
+	capture  bool
 	detector *iface.Detector
 
-	events chan iface.Event
-	ready  chan error
-	done   chan struct{}
+	events   chan iface.Event
+	captured chan Captured
+	ready    chan error
+	done     chan struct{}
 
 	hook   uintptr
 	hookCB uintptr
@@ -58,6 +67,31 @@ func StartHotkey(chord iface.Chord, toggle bool) (*HotkeyWatcher, error) {
 
 // Events returns the chord edge channel. It is closed when the watcher stops.
 func (w *HotkeyWatcher) Events() <-chan iface.Event { return w.events }
+
+// Captured returns the capture channel (nil unless the watcher was started for capture).
+func (w *HotkeyWatcher) Captured() <-chan Captured { return w.captured }
+
+// StartHotkeyCapture installs the hook and reports the next non-modifier key press together with the
+// modifiers held at that instant, so the user can bind a hotkey by pressing it.
+func StartHotkeyCapture() (*HotkeyWatcher, error) {
+	w := &HotkeyWatcher{
+		capture:  true,
+		events:   make(chan iface.Event),
+		captured: make(chan Captured, 1),
+		ready:    make(chan error, 1),
+		done:     make(chan struct{}),
+	}
+	go w.run()
+	select {
+	case err := <-w.ready:
+		if err != nil {
+			return nil, err
+		}
+	case <-time.After(3 * time.Second):
+		return nil, errors.New("hotkey capture thread did not become ready")
+	}
+	return w, nil
+}
 
 // Close stops the watcher and waits for its thread to exit.
 func (w *HotkeyWatcher) Close() error {
@@ -155,13 +189,25 @@ func (w *HotkeyWatcher) hookProc(code, wparam, lparam uintptr) uintptr {
 		case wmKeyDown, wmSysKeyDown, wmKeyUp, wmSysKeyUp:
 			kb := (*kbdllHookStruct)(uptrToPtr(lparam))
 			down := uint32(wparam) == wmKeyDown || uint32(wparam) == wmSysKeyDown
-			if ev, ok := w.detector.Key(kb.vkCode, down, currentModifiers()); ok {
+			if w.capture {
+				w.captureKey(kb.vkCode, down)
+			} else if ev, ok := w.detector.Key(kb.vkCode, down, currentModifiers()); ok {
 				w.emit(ev)
 			}
 		}
 	}
 	r, _, _ := procCallNextHookEx.Call(0, code, wparam, lparam)
 	return r
+}
+
+func (w *HotkeyWatcher) captureKey(vk uint32, down bool) {
+	if !down || iface.IsModifierVK(vk) {
+		return
+	}
+	select {
+	case w.captured <- Captured{VK: vk, Mods: currentModifiers()}:
+	default:
+	}
 }
 
 // emit never blocks: dropping an edge is preferable to stalling the hook thread.
