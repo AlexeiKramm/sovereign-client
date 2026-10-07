@@ -55,16 +55,22 @@ go run ./cmd/sovereign-desktop -tray -addr 192.168.1.5:8765   # skip discovery
 ```
 
 The tray menu carries: the live state, a 5-second **Test dictation**, **Pair with phone…** /
-**Unpair…**, the dictation mode, hotkey preset, clipboard fallback and overlay position settings,
-and **Start with Windows**.
+**Unpair…**, the dictation mode, the hotkey (presets plus **Set custom hotkey…**), the insertion
+method, the overlay position, and **Start with Windows**.
 
 ## Dictating
 
-With the phone connected, press and hold the hotkey to dictate (or press it once to toggle, in
-toggle mode), speak, and release: the finished block is typed at the cursor of the window you
-started in. Injection is only attempted if that window is still focused, and if `SendInput` is
-refused (an elevated target) the tray reports it — and, with the opt-in clipboard fallback on, pastes
-via the clipboard instead. Injection is N synthetic keystrokes, so it is **not** a single undo step.
+With the phone connected, use the hotkey (default `Ctrl+Alt+Space`, rebindable via **Hotkey → Set
+custom hotkey…**). The default **auto** mode uses one key for both gestures: a quick **tap** starts
+dictation and leaves it running (tap again to stop), while **holding** records until you release.
+`Hold to talk` and `Press to toggle` remain selectable modes.
+
+The finished block is inserted at the cursor of the window you started in. Insertion defaults to
+**paste** — one Ctrl+V, fast and atomic at any length — with the clipboard restored afterwards; set
+**Insertion → Type** to type it character-by-character and leave the clipboard untouched. Whichever
+you pick, the other is tried as a fallback so text is never dropped, and if the target window lost
+focus since you started, nothing is written and the tray reports it. Typing is N synthetic
+keystrokes, so it is **not** a single undo step.
 
 The `-ldflags "-s -w -H=windowsgui"` build has no console; diagnostics go to
 `%LOCALAPPDATA%\Sovereign\sovereign-desktop.log`.
