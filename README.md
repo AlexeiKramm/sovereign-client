@@ -7,8 +7,9 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 
 > **Status: early.** The wire-protocol codec and the transport core — mDNS discovery, pinned-TLS
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
-> latency logging — are implemented and host-tested. The tray, floating overlay and hotkeys
-> (Chunk 4) are next.
+> latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
+> pairing, settings, single-instance, autostart) are in; the floating overlay and global
+> hotkeys/injection (the rest of Chunk 4) are next.
 
 ## Where the docs live
 
@@ -40,14 +41,26 @@ go test ./...
 go build ./...
 ```
 
-## Run (headless, no phone needed to build)
+## Run
 
-The binary is the transport core only until Chunk 4 adds the tray. It is driven by flags:
+With no arguments the binary runs the tray app: it claims a single-instance mutex, loads any DPAPI
+credentials, discovers the phone (mDNS, with the LAN-probe fallback), connects, and shows state in
+the tray. Its log is at `%LOCALAPPDATA%\Sovereign\sovereign-desktop.log` (a GUI-subsystem binary has
+no console).
 
 ```powershell
-# Find the phone over mDNS and connect once paired:
+# Tray app (default):
 go run ./cmd/sovereign-desktop
+go run ./cmd/sovereign-desktop -tray -addr 192.168.1.5:8765   # skip discovery
+```
 
+The tray menu carries: the live state, a 5-second **Test dictation** (the session path without
+hotkeys yet), **Pair with phone…** / **Unpair…**, the dictation mode, hotkey preset, clipboard
+fallback and overlay position settings, and **Start with Windows**.
+
+The flags below drive the same transport headlessly for development and verification:
+
+```powershell
 # Manual host:port (mDNS is blocked by AP/client isolation and misrouted by VPNs):
 go run ./cmd/sovereign-desktop -addr 192.168.1.5:8765 -pin <server-spki>
 
@@ -61,7 +74,8 @@ go run ./cmd/sovereign-desktop -once -seconds 5 -v
 ```
 
 Credentials are stored DPAPI-protected at `%LOCALAPPDATA%\Sovereign\credentials.bin`; the
-non-secret device identity sits beside it in `device.json`. `-unpair` deletes the desktop's copy.
+non-secret device identity sits beside it in `device.json` and the tray settings in `settings.json`.
+`-unpair` deletes the desktop's copy.
 
 ## The wire contract
 

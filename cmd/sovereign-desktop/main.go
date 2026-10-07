@@ -1,8 +1,8 @@
-// Command sovereign-desktop is the headless transport client for the Sovereign phone server.
+// Command sovereign-desktop is the Windows tray client for the Sovereign phone server.
 //
-// Chunk 3b scope: mDNS discovery, pinned-TLS connection, mutual-accept pairing, self-healing
-// reconnect, heartbeat and latency logging. The tray, overlay and hotkeys arrive in Chunk 4, so
-// this binary is driven by flags and is meant for manual verification against a real phone.
+// With no flags it runs the tray app: single instance, connect/reconnect to the phone, tray state,
+// and the settings shell. The flags below drive the same transport headlessly for development and
+// verification; hotkeys, injection and the pill overlay arrive with the rest of Chunk 4.
 package main
 
 import (
@@ -12,10 +12,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core"
+	"github.com/alexeikramm/sovereign-desktop/internal/ui"
+	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
 )
 
 func main() {
@@ -37,6 +40,7 @@ func run() error {
 		seconds  = flag.Float64("seconds", 5, "dictation duration for -once")
 		timeout  = flag.Duration("timeout", 5*time.Second, "mDNS discovery timeout")
 		verbose  = flag.Bool("v", false, "log session events")
+		tray     = flag.Bool("tray", false, "run the tray app (the default when no other flags are given)")
 	)
 	flag.Parse()
 
@@ -92,7 +96,47 @@ func run() error {
 		return nil
 	}
 
+	if *tray || flag.NFlag() == 0 {
+		return runTray(ident, store, *addr, *pin, *timeout)
+	}
+
 	return runClient(*addr, *pin, *token, *once, *seconds, *timeout, *verbose, ident, store, logf)
+}
+
+// runTray starts the tray application, refusing to run a second instance in the same session.
+func runTray(ident core.Identity, store core.CredentialStore, addr, pin string, timeout time.Duration) error {
+	// Claim the single-instance mutex before touching the log: a second launch must not truncate
+	// the running instance's log.
+	already, release, err := winplat.AcquireSingleInstance(winplat.SingleInstanceMutexName)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if already {
+		return errors.New("sovereign-desktop is already running; use its tray icon")
+	}
+
+	logger, closeLog, err := ui.OpenLog()
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+
+	dir, err := core.DataDir()
+	if err != nil {
+		return err
+	}
+	logger.Printf("starting tray (addr=%q pin=%q)", addr, pin)
+	ui.Run(ui.Options{
+		Identity:        ident,
+		Store:           store,
+		SettingsPath:    filepath.Join(dir, "settings.json"),
+		Addr:            addr,
+		Pin:             pin,
+		DiscoverTimeout: timeout,
+		Logf:            logger.Printf,
+	})
+	return nil
 }
 
 func runDiscover(timeout time.Duration) error {
