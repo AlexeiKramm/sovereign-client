@@ -1,0 +1,34 @@
+{
+  "protover": 1,
+  "note": "Golden wire vectors for the Sovereign phone<->desktop protocol. See PROTOCOL.md (v1, frozen) and README.md in this directory. `expect` is one of: valid (decode+re-encode must round-trip), ignored (unknown type, per PROTOCOL.md §3, must not be surfaced as a known message), invalid (decode must be rejected with `fault`).",
+  "cases": [
+    { "file": "pair_hello.json", "type": "PAIR_HELLO", "direction": "C2S", "expect": "valid" },
+    { "file": "pair_challenge.json", "type": "PAIR_CHALLENGE", "direction": "S2C", "expect": "valid" },
+    { "file": "pair_response.json", "type": "PAIR_RESPONSE", "direction": "S2C", "expect": "valid" },
+    { "file": "pair_done.json", "type": "PAIR_DONE", "direction": "C2S", "expect": "valid" },
+    { "file": "pair_fail.json", "type": "PAIR_FAIL", "direction": "S2C", "expect": "valid" },
+    { "file": "hello.json", "type": "HELLO", "direction": "C2S", "expect": "valid" },
+    { "file": "welcome.json", "type": "WELCOME", "direction": "S2C", "expect": "valid" },
+    { "file": "auth_fail.json", "type": "AUTH_FAIL", "direction": "S2C", "expect": "valid" },
+    { "file": "start_dictation.json", "type": "START_DICTATION", "direction": "C2S", "expect": "valid" },
+    { "file": "start_ack.json", "type": "START_ACK", "direction": "S2C", "expect": "valid" },
+    { "file": "session_busy.json", "type": "SESSION_BUSY", "direction": "S2C", "expect": "valid" },
+    { "file": "stop_dictation.json", "type": "STOP_DICTATION", "direction": "C2S", "expect": "valid" },
+    { "file": "cancel_dictation.json", "type": "CANCEL_DICTATION", "direction": "C2S", "expect": "valid" },
+    { "file": "takeover.json", "type": "TAKEOVER", "direction": "C2S", "expect": "valid" },
+    { "file": "session_released.json", "type": "SESSION_RELEASED", "direction": "S2C", "expect": "valid" },
+    { "file": "state_changed.json", "type": "STATE_CHANGED", "direction": "S2C", "expect": "valid" },
+    { "file": "provisional_text.json", "type": "PROVISIONAL_TEXT", "direction": "S2C", "expect": "valid" },
+    { "file": "commit_text.json", "type": "COMMIT_TEXT", "direction": "S2C", "expect": "valid" },
+    { "file": "utterance_done.json", "type": "UTTERANCE_DONE", "direction": "S2C", "expect": "valid" },
+    { "file": "error.json", "type": "ERROR", "direction": "S2C", "expect": "valid" },
+    { "file": "ping.json", "type": "PING", "direction": "C2S", "expect": "valid" },
+    { "file": "pong.json", "type": "PONG", "direction": "S2C", "expect": "valid" },
+
+    { "file": "invalid_bad_version.json", "expect": "invalid", "fault": "PROTO_VERSION" },
+    { "file": "unknown_message_type.json", "expect": "ignored" },
+    { "file": "invalid_missing_envelope_field.json", "expect": "invalid", "fault": "MALFORMED_ENVELOPE" },
+    { "file": "invalid_missing_payload_field.json", "expect": "invalid", "fault": "MISSING_FIELD" },
+    { "file": "invalid_bad_enum.json", "expect": "invalid", "fault": "BAD_PAYLOAD" }
+  ]
+}

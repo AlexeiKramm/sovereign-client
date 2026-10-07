@@ -1,0 +1,12 @@
+# Build output
+/dist/
+*.exe
+*.test
+*.out
+
+# Go workspace / editor
+.idea/
+.vscode/
+
+# Agent local operational notes
+AGENTS.md

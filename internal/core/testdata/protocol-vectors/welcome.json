@@ -1,0 +1,1 @@
+{"v":1,"type":"WELCOME","id":"00000000-0000-4000-8000-000000000007","ts":1728214191004,"payload":{"protover":1,"deviceId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","serverName":"Phone","capabilities":["snapshot_commit","provisional_text"],"maxFrameBytes":262144}}
