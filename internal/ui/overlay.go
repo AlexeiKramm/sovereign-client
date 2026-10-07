@@ -91,21 +91,6 @@ func (a *app) setPillStatus(status string) {
 	a.updatePill(func(v *pillView) { v.status = status })
 }
 
-// setPillCommitted replaces the settled text (COMMIT_TEXT is a full snapshot, never an append).
-func (a *app) setPillCommitted(text string) {
-	a.updatePill(func(v *pillView) { v.committed = text })
-}
-
-// setPillProvisional replaces the live tail (PROVISIONAL_TEXT is the unit in flight, not cumulative).
-func (a *app) setPillProvisional(text string) {
-	a.updatePill(func(v *pillView) { v.provisional = text })
-}
-
-// setPillError switches the header to the error treatment.
-func (a *app) setPillError(err bool) {
-	a.updatePill(func(v *pillView) { v.err = err })
-}
-
 // updatePill applies fn to the view and repaints, but only while the pill is showing, so late
 // frames from a session that already ended cannot resurrect it.
 func (a *app) updatePill(fn func(*pillView)) {

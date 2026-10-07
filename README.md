@@ -9,7 +9,8 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
 > latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
 > pairing, settings, single-instance, autostart), the global hold/toggle hotkeys with `SendInput`
-> injection, and the floating pill overlay are in. The control window (Chunk 4d) is next.
+> injection, the floating pill overlay, and the control-window shell are in. Moving the settings
+> from the tray menu into that window (Chunk 4d-b) is next.
 
 ## Where the docs live
 
@@ -71,6 +72,12 @@ recognised in grey — the same split as the phone's card. The pill is a layered
 click-through, never takes focus from the field you are dictating into, and is dismissed by **Esc**
 (which ends the session without inserting) or by ending dictation. Its status line tracks the phone
 (`Warming up…` → `Listening…` → `Finishing…`).
+
+**The control window** opens on a left click of the tray icon (or **Open control panel** in its
+menu) — systray reports a single tap, not a double-click. It shows the same live transcript in a
+larger, focusable window, plus the connection status, the last utterance's ASR/cleanup timings, the
+link RTT and a session counter. Drag it by its header; close it with the × or Esc. Closing it leaves
+the tray running. (Moving the tray's settings into this window is the next chunk.)
 
 The finished block is inserted at the cursor of the window you started in. Insertion defaults to
 **paste** — one Ctrl+V, fast and atomic at any length — with the clipboard restored afterwards; set

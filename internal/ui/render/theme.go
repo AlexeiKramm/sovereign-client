@@ -6,6 +6,7 @@ import "image/color"
 // theme/Color.kt so the desktop pill and the phone card read as the same object.
 type Theme struct {
 	Surface          color.RGBA // the card background
+	Inset            color.RGBA // a recessed area (the panel's live-text box)
 	Border           color.RGBA // 1px hairline around the card
 	OnSurface        color.RGBA // settled text — the phone's near-white
 	OnSurfaceVariant color.RGBA // live tail + status label — the phone's grey
@@ -17,6 +18,7 @@ type Theme struct {
 // DarkTheme is the phone's dark scheme: violet-tinted near-black with a lilac accent.
 var DarkTheme = Theme{
 	Surface:          premul(0x2E, 0x29, 0x37, 0xF2), // SurfaceContainerHigh
+	Inset:            premul(0x23, 0x1F, 0x2A, 0xFF), // SurfaceContainer
 	Border:           premul(0x4A, 0x44, 0x53, 0xC0), // OutlineVariant
 	OnSurface:        premul(0xEA, 0xE0, 0xE7, 0xFF),
 	OnSurfaceVariant: premul(0xCC, 0xC2, 0xCE, 0xFF),
@@ -28,6 +30,7 @@ var DarkTheme = Theme{
 // LightTheme is the phone's warm-cream light scheme with a deep lilac accent.
 var LightTheme = Theme{
 	Surface:          premul(0xEC, 0xE4, 0xD5, 0xF2), // SurfaceContainerHigh
+	Inset:            premul(0xF2, 0xEB, 0xDD, 0xFF), // SurfaceContainer
 	Border:           premul(0xD8, 0xCC, 0xB9, 0xC0), // OutlineVariant
 	OnSurface:        premul(0x2B, 0x26, 0x22, 0xFF),
 	OnSurfaceVariant: premul(0x4E, 0x45, 0x3C, 0xFF),

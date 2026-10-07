@@ -8,19 +8,21 @@ import (
 	"image"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// Overlay is the pill's window: a hand-drawn Win32 layered window that is transparent,
-// click-through, never activated and always on top. No Go GUI toolkit can express that combination
-// (see AGENTS.md), so it is built directly:
+// Overlay is a hand-drawn Win32 layered window. In its default (pill) mode it is transparent,
+// click-through, never activated and always on top; in interactive mode it is a focusable tool
+// window for the control panel. No Go GUI toolkit can express the pill combination (see AGENTS.md),
+// so it is built directly:
 //
 //   - WS_EX_LAYERED   the bitmap's alpha channel is honoured (UpdateLayeredWindow)
-//   - WS_EX_TRANSPARENT  mouse input passes straight through to the window below
-//   - WS_EX_NOACTIVATE   showing it never steals focus from the target field
+//   - WS_EX_TRANSPARENT  mouse input passes straight through to the window below (pill only)
+//   - WS_EX_NOACTIVATE   showing it never steals focus from the target field (pill only)
 //   - WS_EX_TOOLWINDOW   no taskbar button
 //
 // One dedicated OS thread owns the window and pumps its messages (a window's messages must be
@@ -32,12 +34,19 @@ type Overlay struct {
 	ready chan error
 	done  chan struct{}
 
+	// interactive switches the panel behaviour: focusable, clickable, not topmost, and mouse/key
+	// callbacks (below).
+	interactive     bool
 	onDisplayChange func()
+	onMouse         func(MouseEvent)
+	onKey           func(vk uint32) bool
+	onClose         func()
 
 	mu      sync.Mutex
 	pending *overlayFrame
 	closed  bool
 	lastErr error
+	hitRect Rect // interactive: the clickable card; outside it the window is click-through
 
 	// Window-thread-confined GDI state.
 	wndProcCB uintptr
@@ -59,11 +68,27 @@ type overlayFrame struct {
 // StartOverlay creates the hidden pill window. onDisplayChange, if set, is called (on the window
 // thread) when the display or DPI changes, so the controller can re-render and re-anchor.
 func StartOverlay(onDisplayChange func()) (*Overlay, error) {
-	o := &Overlay{
+	return startLayered(&Overlay{
 		ready:           make(chan error, 1),
 		done:            make(chan struct{}),
 		onDisplayChange: onDisplayChange,
-	}
+	})
+}
+
+// StartPanel creates the hidden interactive control window.
+func StartPanel(opts PanelOptions) (*Overlay, error) {
+	return startLayered(&Overlay{
+		ready:           make(chan error, 1),
+		done:            make(chan struct{}),
+		interactive:     true,
+		onDisplayChange: opts.OnDisplayChange,
+		onMouse:         opts.OnMouse,
+		onKey:           opts.OnKey,
+		onClose:         opts.OnClose,
+	})
+}
+
+func startLayered(o *Overlay) (*Overlay, error) {
 	go o.run()
 	select {
 	case err := <-o.ready:
@@ -76,6 +101,39 @@ func StartOverlay(onDisplayChange func()) (*Overlay, error) {
 		return nil, errors.New("overlay window did not become ready")
 	}
 	return o, nil
+}
+
+// SetHitRect sets the clickable region (in client coordinates). An interactive window returns
+// HTTRANSPARENT for points outside it, so the transparent shadow margin does not block clicks on
+// whatever is behind it.
+func (o *Overlay) SetHitRect(r Rect) {
+	o.mu.Lock()
+	o.hitRect = r
+	o.mu.Unlock()
+}
+
+// Focus brings an interactive window to the front and gives it keyboard focus, so Esc and (later)
+// the hotkey-capture field work. It is a no-op for the pill.
+func (o *Overlay) Focus() {
+	o.mu.Lock()
+	hwnd := o.hwnd
+	interactive := o.interactive
+	o.mu.Unlock()
+	if hwnd == 0 || !interactive {
+		return
+	}
+	procSetForegroundWindow.Call(hwnd)
+}
+
+// Move repositions an interactive window without changing its size, content or z-order.
+func (o *Overlay) Move(x, y int) {
+	o.mu.Lock()
+	hwnd := o.hwnd
+	o.mu.Unlock()
+	if hwnd == 0 {
+		return
+	}
+	procSetWindowPos.Call(hwnd, 0, uintptr(int32(x)), uintptr(int32(y)), 0, 0, swpNoSize|swpNoZOrder|swpNoActivate)
 }
 
 // Present uploads img as the window content and places the window's top-left corner at screen
@@ -94,6 +152,13 @@ func (o *Overlay) Hide() {
 	o.pending = &overlayFrame{hide: true}
 	o.mu.Unlock()
 	o.wake()
+}
+
+// Handle returns the window handle, for monitor/work-area queries.
+func (o *Overlay) Handle() uintptr {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.hwnd
 }
 
 // LastError returns the error from the most recent Present, or nil. Frames are applied
@@ -136,7 +201,10 @@ func (o *Overlay) run() {
 	defer close(o.done)
 
 	hInst, _, _ := procGetModuleHandleW.Call(0)
-	className, err := windows.UTF16PtrFromString(overlayClassName)
+	// Each window gets its own class: the WndProc callback is bound to one Overlay, and a shared
+	// class would dispatch the second window's messages to the first window's callback.
+	class := fmt.Sprintf("%s-%d", overlayClassName, overlayClassSeq.Add(1))
+	className, err := windows.UTF16PtrFromString(class)
 	if err != nil {
 		o.ready <- err
 		return
@@ -161,7 +229,11 @@ func (o *Overlay) run() {
 		}
 	}
 
-	exStyle := uintptr(wsExLayered | wsExTransparent | wsExNoActivate | wsExToolWindow | wsExTopmost)
+	exStyle := uintptr(wsExLayered | wsExToolWindow)
+	if !o.interactive {
+		// The pill: transparent, never activated, always on top.
+		exStyle |= wsExTransparent | wsExNoActivate | wsExTopmost
+	}
 	hwnd, _, e := procCreateWindowExW.Call(
 		exStyle,
 		uintptr(unsafe.Pointer(className)),
@@ -212,16 +284,61 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		}
 		return 0
 	case wmNCHitTest:
-		// Belt and braces alongside WS_EX_TRANSPARENT: never claim the hit.
+		if o.interactive {
+			// Click-through outside the card so the transparent shadow margin does not swallow
+			// clicks meant for the window behind it.
+			o.mu.Lock()
+			hr := o.hitRect
+			o.mu.Unlock()
+			x := int(int16(lparam & 0xffff))
+			y := int(int16((lparam >> 16) & 0xffff))
+			if x < hr.X || y < hr.Y || x >= hr.X+hr.W || y >= hr.Y+hr.H {
+				return ^uintptr(0) // HTTRANSPARENT (-1)
+			}
+			return htClient
+		}
+		// The pill: belt and braces alongside WS_EX_TRANSPARENT.
 		return ^uintptr(0) // HTTRANSPARENT (-1)
 	case wmMouseActivate:
+		if o.interactive {
+			return maActivate // the panel is meant to be clicked into
+		}
 		return maNoActivate
+	case wmMouseMove, wmLButtonDown, wmLButtonUp:
+		if o.interactive && o.onMouse != nil {
+			o.onMouse(MouseEvent{
+				X:    int(int16(lparam & 0xffff)),
+				Y:    int(int16((lparam >> 16) & 0xffff)),
+				Kind: mouseKind(uint32(message)),
+			})
+			return 0
+		}
+	case wmKeyDown, wmSysKeyDown:
+		if o.interactive && o.onKey != nil && o.onKey(uint32(wparam)) {
+			return 0
+		}
+	case wmClose:
+		if o.interactive && o.onClose != nil {
+			o.onClose()
+			return 0
+		}
 	case wmDestroy:
 		procPostQuitMessage.Call(0)
 		return 0
 	}
 	r, _, _ := procDefWindowProc.Call(hwnd, message, wparam, lparam)
 	return r
+}
+
+func mouseKind(message uint32) MouseKind {
+	switch message {
+	case wmLButtonDown:
+		return MouseDown
+	case wmLButtonUp:
+		return MouseUp
+	default:
+		return MouseMove
+	}
 }
 
 func (o *Overlay) apply() {
@@ -247,6 +364,12 @@ func (o *Overlay) apply() {
 	o.mu.Lock()
 	o.lastErr = nil
 	o.mu.Unlock()
+	if o.interactive {
+		// The panel is a normal focusable window: show it activated, do not force it topmost (the
+		// user can cover it, and Focus brings it forward when it is opened).
+		procShowWindow.Call(o.hwnd, swShow)
+		return
+	}
 	procShowWindow.Call(o.hwnd, swShowNoActivate)
 	// Re-assert topmost without activating or moving; another always-on-top window can otherwise
 	// cover the pill after it is re-shown.
@@ -377,12 +500,24 @@ func systemDPI() int {
 	return 96
 }
 
+// CursorPos returns the cursor position in physical screen pixels, used while dragging the panel.
+func CursorPos() (int, int) {
+	var p point
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
+	return int(p.X), int(p.Y)
+}
+
 func loadArrowCursor() uintptr {
 	c, _, _ := procLoadCursorW.Call(0, idcArrow)
 	return c
 }
 
 const overlayClassName = "SovereignDesktopOverlay"
+
+// overlayClassSeq gives every layered window its own window class, because each class carries one
+// WndProc callback bound to a single Overlay. Two windows sharing a class would dispatch the second
+// window's messages to the first window's callback.
+var overlayClassSeq atomic.Uint32
 
 const (
 	wsPopup         = 0x80000000
@@ -393,10 +528,12 @@ const (
 	wsExTopmost     = 0x00000008
 
 	swHide           = 0
+	swShow           = 5
 	swShowNoActivate = 4
 
 	swpNoSize     = 0x0001
 	swpNoMove     = 0x0002
+	swpNoZOrder   = 0x0004
 	swpNoActivate = 0x0010
 
 	// hwndTopmost is (HWND)-1.
@@ -410,6 +547,9 @@ const (
 
 	wmDestroy       = 0x0002
 	wmClose         = 0x0010
+	wmMouseMove     = 0x0200
+	wmLButtonDown   = 0x0201
+	wmLButtonUp     = 0x0202
 	wmMouseActivate = 0x0021
 	wmDisplayChange = 0x007E
 	wmNCHitTest     = 0x0084
@@ -418,7 +558,9 @@ const (
 	wmApp          = 0x8000
 	wmOverlayApply = wmApp + 1
 
+	maActivate   = 2
 	maNoActivate = 3
+	htClient     = 1
 
 	monitorDefaultToNearest = 2
 
@@ -503,7 +645,9 @@ var (
 	procDispatchMessageW              = user32.NewProc("DispatchMessageW")
 	procShowWindow                    = user32.NewProc("ShowWindow")
 	procSetWindowPos                  = user32.NewProc("SetWindowPos")
+	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	procGetDC                         = user32.NewProc("GetDC")
+	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procReleaseDC                     = user32.NewProc("ReleaseDC")
 	procLoadCursorW                   = user32.NewProc("LoadCursorW")
 	procUpdateLayeredWindow           = user32.NewProc("UpdateLayeredWindow")

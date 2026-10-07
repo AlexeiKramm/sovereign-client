@@ -88,7 +88,7 @@ func Render(m Model) (Frame, error) {
 	cardW := pillWidth * scale
 	contentW := cardW - 2*innerPad
 
-	lines := wrap(bodyFace, bodySpans(m, theme), contentW)
+	lines := wrap(bodyFace, bodySpans(m.Committed, m.Provisional, theme), contentW)
 	ellipsis := false
 	if len(lines) > maxBodyLines {
 		lines = lines[len(lines)-maxBodyLines:]
@@ -160,13 +160,14 @@ func Render(m Model) (Frame, error) {
 }
 
 // bodySpans is the committed/provisional split: the settled text in OnSurface, the live tail in
-// OnSurfaceVariant. This is the same white/grey split the phone's card draws.
-func bodySpans(m Model, theme Theme) []span {
+// OnSurfaceVariant. This is the same white/grey split the phone's card draws, shared by the pill and
+// the control window.
+func bodySpans(committed, provisional string, theme Theme) []span {
 	var spans []span
-	if s := strings.TrimRight(m.Committed, " \t\r\n"); s != "" {
+	if s := strings.TrimRight(committed, " \t\r\n"); s != "" {
 		spans = append(spans, span{text: s, col: theme.OnSurface})
 	}
-	if s := strings.Trim(m.Provisional, " \t\r\n"); s != "" {
+	if s := strings.Trim(provisional, " \t\r\n"); s != "" {
 		spans = append(spans, span{text: s, col: theme.OnSurfaceVariant})
 	}
 	return spans

@@ -12,6 +12,7 @@ import (
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core"
 	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
 	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
 )
 
@@ -73,8 +74,28 @@ type app struct {
 	escWatcher  *winplat.HotkeyWatcher
 	pill        pillView
 
+	// Control panel (Chunk 4d-a). panelOnce guards creation; panelMu guards the window, the view,
+	// the last rendered layout (for hit-testing) and the drag/position state.
+	panelOnce     sync.Once
+	panelMu       sync.Mutex
+	panelWin      *winplat.Overlay
+	panelContent  panelView
+	panelLayout   render.Panel
+	panelPos      [2]int
+	panelPlaced   bool
+	panelDragging bool
+	panelDragX    int
+	panelDragY    int
+
+	// Panel footer telemetry, guarded by mu.
+	lastAsrMs     int64
+	lastCleanupMs int64
+	lastLatency   string
+	sessionCount  int
+
 	mStatus    *systray.MenuItem
 	mTest      *systray.MenuItem
+	mPanel     *systray.MenuItem
 	mPair      *systray.MenuItem
 	mUnpair    *systray.MenuItem
 	mAuto      *systray.MenuItem
@@ -123,6 +144,7 @@ func (a *app) buildMenu(paired bool) {
 	a.mStatus.Disable()
 	a.mTest = systray.AddMenuItem("Test dictation (5s)", "Start and stop a five-second dictation")
 	a.mTest.Disable()
+	a.mPanel = systray.AddMenuItem("Open control panel", "Live transcript and status")
 
 	systray.AddSeparator()
 	a.mPair = systray.AddMenuItem("Pair with phone…", "Run mutual-accept pairing")
@@ -165,6 +187,7 @@ func (a *app) buildMenu(paired bool) {
 	}
 
 	a.onClicks(a.mTest, func() { go a.testDictation() })
+	a.onClicks(a.mPanel, func() { a.openPanel() })
 	a.onClicks(a.mPair, func() { go a.doPair() })
 	a.onClicks(a.mUnpair, func() { go a.doUnpair() })
 	a.onClicks(a.mAuto, func() { a.setMode(ModeAuto) })
@@ -185,6 +208,10 @@ func (a *app) buildMenu(paired bool) {
 		p, item := p, item
 		a.onClicks(item, func() { a.setPosition(p) })
 	}
+
+	// systray reports a single left tap, not a double-click, so a left click opens the panel and
+	// the right-click menu keeps everything else. The callback must not block the message loop.
+	systray.SetOnTapped(func() { go a.openPanel() })
 }
 
 // onClicks runs fn on every click of item until the app exits. Each item gets its own goroutine so
@@ -205,6 +232,7 @@ func (a *app) onClicks(item *systray.MenuItem, fn func()) {
 func (a *app) quit() {
 	a.disarmHotkey()
 	a.closePill()
+	a.closePanelWindow()
 	a.cancel()
 	systray.Quit()
 }
@@ -329,6 +357,7 @@ func (a *app) handlers() core.Handlers {
 	return core.Handlers{
 		OnConn: func(st core.ConnState, detail string) {
 			a.setState(mapConnState(st), detail)
+			a.setPanelStatus(statusTitle(mapConnState(st), detail))
 			if st != core.StateReady {
 				a.hidePill() // a dropped or unauthenticated link takes the pill down with it
 				a.signalSmartReset()
@@ -338,6 +367,7 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(true)
 			a.setState(StateDictating, "listening")
 			a.startPill()
+			a.countSession()
 		},
 		OnState: func(sessionID, st string) {
 			if st == core.StateIdle {
@@ -353,6 +383,7 @@ func (a *app) handlers() core.Handlers {
 		OnBusy: func(holder string, takeover bool) {
 			a.setDictating(false)
 			a.setState(StateError, "phone busy ("+holder+")")
+			a.setPanelStatus("Phone busy (" + holder + ")")
 			a.hidePill()
 			a.signalSmartReset()
 		},
@@ -361,11 +392,12 @@ func (a *app) handlers() core.Handlers {
 		},
 		OnCommitted: func(sessionID, text string, perf core.CommitPerf) {
 			a.logf("commit: %q (asr=%dms cleanup=%dms)", text, perf.AsrMs, perf.CleanupMs)
-			a.setPillCommitted(text)
+			a.setLiveCommitted(text)
+			a.recordCommitted(perf)
 		},
 		OnProvisional: func(sessionID, text string) {
 			a.logf("live: %q", text)
-			a.setPillProvisional(text)
+			a.setLiveProvisional(text)
 		},
 		// UTTERANCE_DONE is the only injection trigger (PROTOCOL.md §6), and only FINAL carries
 		// text worth typing.
@@ -390,13 +422,17 @@ func (a *app) handlers() core.Handlers {
 			if fatal {
 				a.setDictating(false)
 				a.setState(StateError, code)
+				a.setPanelStatus(code)
 				a.hidePill()
 				a.signalSmartReset()
 			} else {
-				a.setPillError(true)
+				a.setLiveError(true)
 			}
 		},
-		OnLatency: func(line string) { a.logf("latency: %s", line) },
+		OnLatency: func(line string) {
+			a.logf("latency: %s", line)
+			a.recordLatency(line)
+		},
 	}
 }
 

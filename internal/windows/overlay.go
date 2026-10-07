@@ -5,3 +5,38 @@ package windows
 type Rect struct {
 	X, Y, W, H int
 }
+
+// MouseKind is the kind of pointer event a panel receives.
+type MouseKind int
+
+const (
+	// MouseMove is a pointer move over the panel.
+	MouseMove MouseKind = iota
+	// MouseDown is a left-button press.
+	MouseDown
+	// MouseUp is a left-button release.
+	MouseUp
+)
+
+// MouseEvent is a pointer event in the panel's client coordinates (physical pixels), measured from
+// the window's top-left corner — which includes the transparent shadow margin, so the controller
+// hit-tests against the same rects it drew.
+type MouseEvent struct {
+	X, Y int
+	Kind MouseKind
+}
+
+// PanelOptions configures the interactive control window (Chunk 4d). Unlike the pill it is
+// focusable and clickable: it takes keyboard input (Esc closes it) and pointer events for its rows
+// and buttons.
+type PanelOptions struct {
+	// OnMouse receives pointer events; it runs on the window thread and must not block.
+	OnMouse func(MouseEvent)
+	// OnKey receives key-down virtual-key codes; return true to swallow the key.
+	OnKey func(vk uint32) bool
+	// OnClose is called when the user asks to close the window (the system close gesture). The
+	// controller decides whether to hide or destroy it.
+	OnClose func()
+	// OnDisplayChange is called when the display or DPI changes.
+	OnDisplayChange func()
+}
