@@ -8,8 +8,8 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 > **Status: early.** The wire-protocol codec and the transport core — mDNS discovery, pinned-TLS
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
 > latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
-> pairing, settings, single-instance, autostart) are in; the floating overlay and global
-> hotkeys/injection (the rest of Chunk 4) are next.
+> pairing, settings, single-instance, autostart) and the global hold/toggle hotkeys with `SendInput`
+> injection are in; the floating pill overlay (Chunk 4c) is next.
 
 ## Where the docs live
 
@@ -54,9 +54,20 @@ go run ./cmd/sovereign-desktop
 go run ./cmd/sovereign-desktop -tray -addr 192.168.1.5:8765   # skip discovery
 ```
 
-The tray menu carries: the live state, a 5-second **Test dictation** (the session path without
-hotkeys yet), **Pair with phone…** / **Unpair…**, the dictation mode, hotkey preset, clipboard
-fallback and overlay position settings, and **Start with Windows**.
+The tray menu carries: the live state, a 5-second **Test dictation**, **Pair with phone…** /
+**Unpair…**, the dictation mode, hotkey preset, clipboard fallback and overlay position settings,
+and **Start with Windows**.
+
+## Dictating
+
+With the phone connected, press and hold the hotkey to dictate (or press it once to toggle, in
+toggle mode), speak, and release: the finished block is typed at the cursor of the window you
+started in. Injection is only attempted if that window is still focused, and if `SendInput` is
+refused (an elevated target) the tray reports it — and, with the opt-in clipboard fallback on, pastes
+via the clipboard instead. Injection is N synthetic keystrokes, so it is **not** a single undo step.
+
+The `-ldflags "-s -w -H=windowsgui"` build has no console; diagnostics go to
+`%LOCALAPPDATA%\Sovereign\sovereign-desktop.log`.
 
 The flags below drive the same transport headlessly for development and verification:
 

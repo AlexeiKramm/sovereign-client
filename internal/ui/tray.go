@@ -11,6 +11,7 @@ import (
 	"fyne.io/systray"
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core"
+	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
 )
 
@@ -57,6 +58,10 @@ type app struct {
 	client     *core.Client
 	connecting bool
 	connCancel context.CancelFunc
+	dictating  bool    // a hotkey-initiated session is live
+	target     uintptr // window to inject into, captured when dictation started
+	hotkey     *winplat.HotkeyWatcher
+	armed      bool
 
 	mStatus   *systray.MenuItem
 	mTest     *systray.MenuItem
@@ -175,6 +180,7 @@ func (a *app) onClicks(item *systray.MenuItem, fn func()) {
 }
 
 func (a *app) quit() {
+	a.disarmHotkey()
 	a.cancel()
 	systray.Quit()
 }
@@ -192,6 +198,14 @@ func (a *app) setState(s TrayState, detail string) {
 		} else {
 			a.mTest.Disable()
 		}
+	}
+
+	// Hotkeys are live only while there is a link to dictate over.
+	switch s {
+	case StateReady, StateDictating:
+		a.armHotkey()
+	default:
+		a.disarmHotkey()
 	}
 }
 
@@ -293,16 +307,19 @@ func (a *app) handlers() core.Handlers {
 			a.setState(mapConnState(st), detail)
 		},
 		OnStarted: func(sessionID string) {
+			a.setDictating(true)
 			a.setState(StateDictating, "listening")
 		},
 		OnState: func(sessionID, st string) {
 			if st == core.StateIdle {
+				a.setDictating(false)
 				a.setState(StateReady, "")
 			} else {
 				a.setState(StateDictating, strings.ToLower(st))
 			}
 		},
 		OnBusy: func(holder string, takeover bool) {
+			a.setDictating(false)
 			a.setState(StateError, "phone busy ("+holder+")")
 		},
 		OnCommitted: func(sessionID, text string, perf core.CommitPerf) {
@@ -311,16 +328,24 @@ func (a *app) handlers() core.Handlers {
 		OnProvisional: func(sessionID, text string) {
 			a.logf("live: %q", text)
 		},
+		// UTTERANCE_DONE is the only injection trigger (PROTOCOL.md §6), and only FINAL carries
+		// text worth typing.
 		OnUtterance: func(sessionID, delivery, raw, reason string) {
+			a.setDictating(false)
 			a.setState(StateReady, "")
 			a.logf("utterance done (%s): %q", reason, delivery)
+			if reason == core.DoneFinal && delivery != "" {
+				a.inject(delivery)
+			}
 		},
 		OnReleased: func(sessionID, reason string) {
+			a.setDictating(false)
 			a.setState(StateReady, "")
 		},
 		OnError: func(code, msg string, fatal bool) {
 			a.logf("phone error: %s: %s (fatal=%v)", code, msg, fatal)
 			if fatal {
+				a.setDictating(false)
 				a.setState(StateError, code)
 			}
 		},
@@ -335,6 +360,7 @@ func (a *app) testDictation() {
 	if c == nil {
 		return
 	}
+	a.captureTarget()
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("test dictation start: %v", err)
 		return
@@ -350,6 +376,167 @@ func (a *app) testDictation() {
 			a.logf("test dictation stop: %v", err)
 		}
 	})
+}
+
+// captureTarget records the window that should receive the finished text. It is called just before
+// START_DICTATION, while the user's editor is still the foreground window.
+func (a *app) captureTarget() {
+	t := winplat.ForegroundWindow()
+	a.mu.Lock()
+	a.target = t
+	a.mu.Unlock()
+}
+
+func (a *app) setDictating(v bool) {
+	a.mu.Lock()
+	a.dictating = v
+	a.mu.Unlock()
+}
+
+func (a *app) isDictating() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dictating
+}
+
+// onHotkeyEvent maps chord edges to start/stop per the configured mode.
+func (a *app) onHotkeyEvent(ev iface.Event) {
+	a.mu.Lock()
+	toggle := a.settings.Mode == ModeToggle
+	a.mu.Unlock()
+
+	if toggle {
+		if ev == iface.Press { // RegisterHotKey reports Press only
+			if a.isDictating() {
+				a.stopDictation()
+			} else {
+				a.startDictation()
+			}
+		}
+		return
+	}
+	switch ev {
+	case iface.Press:
+		if !a.isDictating() {
+			a.startDictation()
+		}
+	case iface.Release:
+		if a.isDictating() {
+			a.stopDictation()
+		}
+	}
+}
+
+func (a *app) startDictation() {
+	a.mu.Lock()
+	c := a.client
+	a.mu.Unlock()
+	if c == nil {
+		return
+	}
+	a.captureTarget()
+	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
+		a.logf("dictation start failed: %v", err)
+	}
+}
+
+func (a *app) stopDictation() {
+	a.mu.Lock()
+	c := a.client
+	a.mu.Unlock()
+	if c == nil {
+		return
+	}
+	if err := c.StopDictation(a.ctx); err != nil {
+		a.logf("dictation stop failed: %v", err)
+	}
+}
+
+// inject types the finished block. Focus is verified in InjectText; if injection is refused and the
+// user opted in, it falls back to a clipboard-restore paste; otherwise the text is left on the
+// clipboard so nothing is silently dropped (D-120).
+func (a *app) inject(text string) {
+	a.mu.Lock()
+	target := a.target
+	a.mu.Unlock()
+
+	if err := winplat.InjectText(target, text); err == nil {
+		a.logf("injected %d chars", len(text))
+		return
+	} else {
+		a.logf("injection failed: %v", err)
+	}
+
+	if a.settingsFallback() {
+		if err := winplat.PasteText(text); err != nil {
+			a.logf("clipboard fallback failed: %v", err)
+			a.setState(StateError, "injection blocked")
+			return
+		}
+		a.logf("injected via clipboard fallback")
+		return
+	}
+	if err := winplat.CopyText(text); err != nil {
+		a.logf("could not place text on the clipboard: %v", err)
+	}
+	a.setState(StateError, "injection blocked; text on clipboard")
+}
+
+// armHotkey starts the global hotkey watcher for the configured chord and mode. It is idempotent.
+func (a *app) armHotkey() {
+	a.mu.Lock()
+	if a.armed {
+		a.mu.Unlock()
+		return
+	}
+	chord, err := iface.ParseHotkey(a.settings.Hotkey)
+	toggle := a.settings.Mode == ModeToggle
+	a.mu.Unlock()
+	if err != nil {
+		a.logf("hotkey %q is invalid: %v", a.settings.Hotkey, err)
+		return
+	}
+
+	w, err := winplat.StartHotkey(chord, toggle)
+	if err != nil {
+		a.logf("hotkey unavailable: %v", err)
+		a.setState(StateError, "hotkey unavailable")
+		return
+	}
+	a.mu.Lock()
+	a.hotkey = w
+	a.armed = true
+	a.mu.Unlock()
+	a.logf("hotkey armed: %s (toggle=%v)", chord, toggle)
+	go a.hotkeyLoop(w)
+}
+
+func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher) {
+	for ev := range w.Events() {
+		a.onHotkeyEvent(ev)
+	}
+}
+
+func (a *app) disarmHotkey() {
+	a.mu.Lock()
+	w := a.hotkey
+	a.hotkey = nil
+	a.armed = false
+	a.mu.Unlock()
+	if w != nil {
+		_ = w.Close()
+	}
+}
+
+// rearmHotkey applies a hotkey/mode change if the watcher is currently running.
+func (a *app) rearmHotkey() {
+	a.mu.Lock()
+	armed := a.armed
+	a.mu.Unlock()
+	if armed {
+		a.disarmHotkey()
+		a.armHotkey()
+	}
 }
 
 func (a *app) doPair() {
@@ -436,6 +623,7 @@ func (a *app) setMode(m string) {
 		a.mHold.Uncheck()
 	}
 	a.persist(s)
+	a.rearmHotkey()
 }
 
 func (a *app) setHotkey(p string) {
@@ -451,6 +639,7 @@ func (a *app) setHotkey(p string) {
 		}
 	}
 	a.persist(s)
+	a.rearmHotkey()
 }
 
 func (a *app) setPosition(p string) {
