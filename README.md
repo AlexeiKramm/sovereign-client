@@ -5,8 +5,10 @@ does the listening — streaming ASR plus on-device LLM cleanup — while this t
 your LAN, connects over pinned `wss://`, shows a floating pill while you speak, and types the finished
 text at your cursor when you stop. No audio and no keystrokes ever touch your document mid-sentence.
 
-> **Status: early.** The wire-protocol codec is implemented and tested; transport, pairing, the
-> overlay and hotkeys are in progress.
+> **Status: early.** The wire-protocol codec and the transport core — mDNS discovery, pinned-TLS
+> `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
+> latency logging — are implemented and host-tested. The tray, floating overlay and hotkeys
+> (Chunk 4) are next.
 
 ## Where the docs live
 
@@ -37,6 +39,29 @@ go vet ./...
 go test ./...
 go build ./...
 ```
+
+## Run (headless, no phone needed to build)
+
+The binary is the transport core only until Chunk 4 adds the tray. It is driven by flags:
+
+```powershell
+# Find the phone over mDNS and connect once paired:
+go run ./cmd/sovereign-desktop
+
+# Manual host:port (mDNS is blocked by AP/client isolation and misrouted by VPNs):
+go run ./cmd/sovereign-desktop -addr 192.168.1.5:8765 -pin <server-spki>
+
+# First-time mutual-accept pairing: the phone shows an approval dialog; the fingerprint
+# printed here must match the phone's screen.
+go run ./cmd/sovereign-desktop -pair -addr 192.168.1.5:8765
+
+# Browse only, and a one-shot dictation demo:
+go run ./cmd/sovereign-desktop -discover
+go run ./cmd/sovereign-desktop -once -seconds 5 -v
+```
+
+Credentials are stored DPAPI-protected at `%LOCALAPPDATA%\Sovereign\credentials.bin`; the
+non-secret device identity sits beside it in `device.json`. `-unpair` deletes the desktop's copy.
 
 ## The wire contract
 
