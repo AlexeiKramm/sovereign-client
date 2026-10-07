@@ -15,7 +15,8 @@ const (
 	StateConnecting                  // found the phone; establishing or recovering the link
 	StateReady                       // authenticated and idle; hotkeys armed
 	StateDictating                   // hotkey active; phone mic recording
-	StateError                       // unpaired, session busy, or transport failure
+	StateBusy                        // the phone is taken by another capture; the link is fine
+	StateError                       // unpaired or transport failure
 )
 
 // stateColor is the pill's state dot colour, reused for the tray so the two surfaces agree.
@@ -27,7 +28,7 @@ func stateColor(s TrayState) color.NRGBA {
 		return color.NRGBA{R: 0x8B, G: 0x5C, B: 0xF6, A: 0xFF} // violet
 	case StateDictating:
 		return color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF} // red
-	case StateError:
+	case StateBusy, StateError:
 		return color.NRGBA{R: 0xFF, G: 0x6D, B: 0x00, A: 0xFF} // orange
 	default:
 		return color.NRGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF} // grey
@@ -43,6 +44,8 @@ func stateLabel(s TrayState) string {
 		return "Ready"
 	case StateDictating:
 		return "Dictating"
+	case StateBusy:
+		return "Phone busy"
 	case StateError:
 		return "Error"
 	default:

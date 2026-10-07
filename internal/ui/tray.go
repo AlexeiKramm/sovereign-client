@@ -60,6 +60,7 @@ type app struct {
 	connecting    bool
 	connCancel    context.CancelFunc
 	dictating     bool                    // a hotkey-initiated session is live
+	busy          bool                    // the phone is taken by another capture (link is healthy)
 	phoneState    core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
 	target        uintptr                 // window to inject into, captured when dictation started
 	hotkey        *winplat.HotkeyWatcher
@@ -188,25 +189,45 @@ func (a *app) quit() {
 
 // setState updates the icon, tooltip and status row. It is safe to call from any goroutine.
 func (a *app) setState(s TrayState, detail string) {
+	// Any state other than StateBusy means the phone is no longer marked taken.
+	if s != StateBusy {
+		a.mu.Lock()
+		a.busy = false
+		a.mu.Unlock()
+	}
+
 	systray.SetIcon(trayIcon(s))
 	systray.SetTooltip("Sovereign — " + statusTitle(s, detail))
 	if a.mStatus != nil {
 		a.mStatus.SetTitle(statusTitle(s, detail))
 	}
 	if a.mTest != nil {
-		if s == StateReady {
+		if s == StateReady || s == StateBusy {
 			a.mTest.Enable()
 		} else {
 			a.mTest.Disable()
 		}
 	}
 
-	// Hotkeys are live only while there is a link to dictate over.
-	switch s {
-	case StateReady, StateDictating:
+	// Hotkeys are live while there is a link to dictate over. A taken phone is still a live link —
+	// the phone refuses the session, it does not break the connection — so the hotkey stays armed;
+	// disarming it here would wedge dictation until a reconnect.
+	if hotkeysLive(s) {
 		a.armHotkey()
-	default:
+	} else {
 		a.disarmHotkey()
+	}
+}
+
+// hotkeysLive reports whether the tray state should have the dictation hotkey armed. StateBusy must
+// keep it armed: the phone being taken is a refusal, not a transport failure, and nothing else
+// re-arms the watcher until a reconnect.
+func hotkeysLive(s TrayState) bool {
+	switch s {
+	case StateReady, StateDictating, StateBusy:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -331,11 +352,10 @@ func (a *app) handlers() core.Handlers {
 		},
 		OnBusy: func(holder string, takeover bool) {
 			a.setDictating(false)
-			a.setState(StateError, "phone busy ("+holder+")")
-			a.setPanelStatus("Phone busy (" + holder + ")")
+			// A refusal is not a link failure: mark the phone taken (the hotkey stays armed) and
+			// show it where the user is looking, the way the phone's own pill marks a refused tap.
+			a.setBusy(busyHolder(holder))
 			a.hidePill()
-			// The refusal is authoritative, so show it where the user is looking: the pill, for a
-			// couple of seconds, the same way the phone's own pill marks a refused tap.
 			a.showBusyPill(busyMessage(holder))
 			a.signalSmartReset()
 		},
@@ -451,11 +471,11 @@ func (a *app) isDictating() bool {
 	return a.dictating
 }
 
-// setPhoneState records the phone's advertised pipeline availability (SERVER_STATE, v1.1) and
-// repaints the control window, whose footer shows it. It is advisory, so it is **not** used to
-// short-circuit a hotkey: the reply to START_DICTATION stays authoritative (PROTOCOL.md §5), which
-// avoids refusing a dictation over a stale "busy" from a session that has just ended. A refusal
-// shows up as the pill's busy message (OnBusy).
+// setPhoneState records the phone's advertised pipeline availability (SERVER_STATE, v1.1), drives
+// the tray's "phone busy" state from it, and repaints the control window's footer. It is advisory,
+// so it is **not** used to short-circuit a hotkey: the reply to START_DICTATION stays authoritative
+// (PROTOCOL.md §5), which avoids refusing a dictation over a stale "busy" from a session that has
+// just ended. A refusal still shows up as the pill's busy message (OnBusy).
 func (a *app) setPhoneState(s core.ServerStatePayload) {
 	a.mu.Lock()
 	a.phoneState = s
@@ -465,7 +485,40 @@ func (a *app) setPhoneState(s core.ServerStatePayload) {
 	} else {
 		a.logf("phone availability: %s (holder %q)", s.State, s.HolderName)
 	}
+
+	// The advertised availability is the only thing that reliably says when the phone frees again,
+	// so it drives the tray's busy state in both directions. Our own session reports BUSY ("another
+	// desktop"), which must not overwrite the dictating state.
+	switch s.State {
+	case core.ServerStateReserved, core.ServerStateBusy:
+		if !a.isDictating() {
+			a.setBusy(busyClause(s))
+		}
+	default:
+		a.clearBusy()
+	}
 	a.refreshPanel()
+}
+
+// setBusy marks the phone as taken by another capture. The link is healthy, so this is not an error:
+// the hotkey stays armed and the tray returns to Ready when SERVER_STATE reports idle.
+func (a *app) setBusy(clause string) {
+	a.mu.Lock()
+	a.busy = true
+	a.mu.Unlock()
+	a.setState(StateBusy, clause)
+}
+
+// clearBusy returns the tray to Ready if the phone is still marked taken. It is a no-op otherwise,
+// so a dictation that started in the meantime is not clobbered.
+func (a *app) clearBusy() {
+	a.mu.Lock()
+	busy := a.busy
+	a.busy = false
+	a.mu.Unlock()
+	if busy {
+		a.setState(StateReady, "")
+	}
 }
 
 // phoneAvailability returns the last advertised availability; the zero value (IDLE) before any

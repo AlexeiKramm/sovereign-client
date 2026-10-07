@@ -179,8 +179,19 @@ func TestBusyMessage(t *testing.T) {
 	}
 }
 
+// TestBusyClause pins the tray's short form for the same states (the tray prefixes its own label).
+func TestBusyClause(t *testing.T) {
+	if got := busyClause(core.ServerStatePayload{State: core.ServerStateReserved, HolderName: "Phone"}); got != "the phone's pill is dictating" {
+		t.Errorf("busyClause(RESERVED) = %q", got)
+	}
+	if got := busyClause(core.ServerStatePayload{State: core.ServerStateBusy, HolderName: "another desktop"}); got != "another desktop is dictating" {
+		t.Errorf("busyClause(BUSY) = %q", got)
+	}
+}
+
 // TestPanelInfoShowsAvailability checks the availability line leads the footer while the phone is
-// taken, and disappears when it is idle.
+// taken, disappears when it is idle, and is omitted for our own session (which the phone reports as
+// BUSY "another desktop" and would otherwise read as someone else dictating).
 func TestPanelInfoShowsAvailability(t *testing.T) {
 	a := &app{}
 	a.phoneState = core.ServerStatePayload{State: core.ServerStateReserved, HolderName: "Phone"}
@@ -192,5 +203,11 @@ func TestPanelInfoShowsAvailability(t *testing.T) {
 	a.phoneState = core.ServerStatePayload{}
 	if info := a.panelInfo(); len(info) != 1 || info[0] != "Sessions 0" {
 		t.Fatalf("panelInfo when idle = %q, want only the session count", info)
+	}
+
+	a.dictating = true
+	a.phoneState = core.ServerStatePayload{State: core.ServerStateBusy, HolderName: "another desktop"}
+	if info := a.panelInfo(); len(info) != 1 || info[0] != "Sessions 0" {
+		t.Fatalf("panelInfo while dictating = %q, want the availability line omitted", info)
 	}
 }

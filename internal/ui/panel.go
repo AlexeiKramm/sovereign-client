@@ -227,11 +227,16 @@ func (a *app) panelInfo() []string {
 	latency := a.lastLatency
 	sessions := a.sessionCount
 	phone := a.phoneState
+	dictating := a.dictating
 	a.mu.Unlock()
 
 	var info []string
-	if t := availabilityText(phone); t != "" {
-		info = append(info, t)
+	// Our own session is reported as BUSY ("another desktop"), which would read as someone else
+	// dictating; the status line already says what we are doing, so omit the line while we hold it.
+	if !dictating {
+		if t := availabilityText(phone); t != "" {
+			info = append(info, t)
+		}
 	}
 	if asr > 0 || cleanup > 0 {
 		info = append(info, fmt.Sprintf("Last ASR %d ms · Cleanup %d ms", asr, cleanup))
@@ -248,27 +253,44 @@ func (a *app) panelInfo() []string {
 // to a START_DICTATION stays authoritative (PROTOCOL.md §5).
 func availabilityText(s core.ServerStatePayload) string {
 	switch s.State {
-	case core.ServerStateReserved:
-		return "Phone busy — the phone's pill is dictating"
-	case core.ServerStateBusy:
-		return busyMessage(s.HolderName)
+	case core.ServerStateReserved, core.ServerStateBusy:
+		if c := busyClause(s); c != "" {
+			return "Phone busy — " + c
+		}
+		return "Phone busy"
 	default:
 		return ""
 	}
 }
 
-// busyMessage names the holder in a refusal, for both the panel footer (SERVER_STATE) and the pill
-// (SESSION_BUSY). The phone names itself for a phone-local capture and sends the placeholder
-// "another desktop" for a desktop session it cannot name.
-func busyMessage(holder string) string {
+// busyClause names who holds the pipeline for a SERVER_STATE frame: the phone itself for a
+// phone-local capture, otherwise the holder.
+func busyClause(s core.ServerStatePayload) string {
+	if s.State == core.ServerStateReserved {
+		return "the phone's pill is dictating"
+	}
+	return busyHolder(s.HolderName)
+}
+
+// busyHolder turns a holder name into the "who is dictating" clause. The phone names itself for a
+// phone-local capture and sends the placeholder "another desktop" for a desktop it cannot name.
+func busyHolder(holder string) string {
 	switch holder {
 	case "":
-		return "Phone busy"
+		return ""
 	case "another desktop":
-		return "Phone busy — another desktop is dictating"
+		return "another desktop is dictating"
 	default:
-		return "Phone busy — " + holder + " is dictating"
+		return holder + " is dictating"
 	}
+}
+
+// busyMessage is the pill's one-line refusal, sharing the panel's wording.
+func busyMessage(holder string) string {
+	if c := busyHolder(holder); c != "" {
+		return "Phone busy — " + c
+	}
+	return "Phone busy"
 }
 
 // onPanelMouse handles clicks and drags. It runs on the window thread, so it never blocks: a control
