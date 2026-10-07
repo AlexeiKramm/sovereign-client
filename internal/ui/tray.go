@@ -58,8 +58,9 @@ type app struct {
 	client     *core.Client
 	connecting bool
 	connCancel context.CancelFunc
-	dictating  bool    // a hotkey-initiated session is live
-	target     uintptr // window to inject into, captured when dictation started
+	dictating  bool                    // a hotkey-initiated session is live
+	phoneState core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
+	target     uintptr                 // window to inject into, captured when dictation started
 	hotkey     *winplat.HotkeyWatcher
 	armed      bool
 
@@ -335,6 +336,9 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(false)
 			a.setState(StateError, "phone busy ("+holder+")")
 		},
+		OnServerState: func(s core.ServerStatePayload) {
+			a.setPhoneState(s)
+		},
 		OnCommitted: func(sessionID, text string, perf core.CommitPerf) {
 			a.logf("commit: %q (asr=%dms cleanup=%dms)", text, perf.AsrMs, perf.CleanupMs)
 		},
@@ -410,6 +414,29 @@ func (a *app) isDictating() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.dictating
+}
+
+// setPhoneState records the phone's advertised pipeline availability (SERVER_STATE, v1.1). It is
+// advisory and deliberately has **no tray rendering yet**: the "phone taken" response belongs in the
+// desktop pill window (4c/4d), which does not exist. It is stored so that window can read it, and
+// logged so the state is observable meanwhile (CHUNK-8).
+func (a *app) setPhoneState(s core.ServerStatePayload) {
+	a.mu.Lock()
+	a.phoneState = s
+	a.mu.Unlock()
+	if s.State == core.ServerStateIdle {
+		a.logf("phone availability: idle")
+	} else {
+		a.logf("phone availability: %s (holder %q)", s.State, s.HolderName)
+	}
+}
+
+// phoneAvailability returns the last advertised availability; the zero value (IDLE) before any
+// frame arrives. Read by the future desktop pill window when it decides how to respond to a hotkey.
+func (a *app) phoneAvailability() core.ServerStatePayload {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.phoneState
 }
 
 // tapWindow is how long a chord may be held before a release is treated as "hold" rather than

@@ -141,6 +141,15 @@ const (
 	StateError      = "ERROR"
 )
 
+// ServerState (SERVER_STATE, PROTOCOL.md §6 v1.1 addendum). Advisory availability of the phone's
+// one pipeline: IDLE = free, RESERVED = a phone-local capture (pill/transcribe), BUSY = a desktop
+// dictation session.
+const (
+	ServerStateIdle     = "IDLE"
+	ServerStateReserved = "RESERVED"
+	ServerStateBusy     = "BUSY"
+)
+
 // UtteranceDone.reason
 const (
 	DoneFinal     = "FINAL"
@@ -269,6 +278,16 @@ type StateChangedPayload struct {
 	SessionID string `json:"sessionId"`
 	State     string `json:"state"`
 }
+
+// ServerStatePayload is the unsolicited pipeline-availability frame (SERVER_STATE, PROTOCOL.md §6
+// v1.1 addendum). State ∈ IDLE | RESERVED | BUSY; HolderName/HolderDeviceID are empty when IDLE.
+type ServerStatePayload struct {
+	State          string `json:"state"`
+	HolderDeviceID string `json:"holderDeviceId"`
+	HolderName     string `json:"holderName"`
+}
+
+func (*ServerStatePayload) payload() {}
 
 type ProvisionalTextPayload struct {
 	SessionID string `json:"sessionId"`
@@ -416,6 +435,8 @@ var catalogue = []MessageType{
 		[]field{str("sessionId"), enum("reason", ReleaseStopped, ReleaseCancelled, ReleaseTakeover, ReleaseTimeout, ReleaseError)}},
 	{"STATE_CHANGED", S2C, func() Payload { return &StateChangedPayload{} },
 		[]field{str("sessionId"), enum("state", StateWarming, StateListening, StateProcessing, StateIdle, StateCancelled, StateError)}},
+	{"SERVER_STATE", S2C, func() Payload { return &ServerStatePayload{} },
+		[]field{enum("state", ServerStateIdle, ServerStateReserved, ServerStateBusy), str("holderDeviceId"), str("holderName")}},
 	{"PROVISIONAL_TEXT", S2C, func() Payload { return &ProvisionalTextPayload{} },
 		[]field{str("sessionId"), integer("seq"), str("text")}},
 	{"COMMIT_TEXT", S2C, func() Payload { return &CommitTextPayload{} },

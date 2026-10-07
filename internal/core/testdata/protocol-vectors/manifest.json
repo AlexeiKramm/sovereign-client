@@ -18,6 +18,7 @@
     { "file": "takeover.json", "type": "TAKEOVER", "direction": "C2S", "expect": "valid" },
     { "file": "session_released.json", "type": "SESSION_RELEASED", "direction": "S2C", "expect": "valid" },
     { "file": "state_changed.json", "type": "STATE_CHANGED", "direction": "S2C", "expect": "valid" },
+    { "file": "server_state.json", "type": "SERVER_STATE", "direction": "S2C", "expect": "valid" },
     { "file": "provisional_text.json", "type": "PROVISIONAL_TEXT", "direction": "S2C", "expect": "valid" },
     { "file": "commit_text.json", "type": "COMMIT_TEXT", "direction": "S2C", "expect": "valid" },
     { "file": "utterance_done.json", "type": "UTTERANCE_DONE", "direction": "S2C", "expect": "valid" },

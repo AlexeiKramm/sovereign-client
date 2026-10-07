@@ -4,8 +4,10 @@ Machine-checkable companions to [`../PROTOCOL.md`](../PROTOCOL.md) (v1, frozen).
 and the separate desktop repo both run a test that reads this directory, so the contract cannot drift
 from what either side actually encodes.
 
-**Do not hand-edit a vector without also editing `PROTOCOL.md` and bumping `protover`.** Adding a
-message means adding a vector.
+**Do not hand-edit a vector without also editing `PROTOCOL.md`.** Adding a message means adding a
+vector. A **breaking** change (one an old receiver would misinterpret) bumps `protover`; an
+**additive** message that an old receiver must ignore (PROTOCOL.md §3) does not — see the v1.1
+addendum there (`SERVER_STATE`).
 
 ## Layout
 

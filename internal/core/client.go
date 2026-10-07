@@ -52,6 +52,7 @@ type Handlers struct {
 	OnConn        func(state ConnState, detail string)
 	OnStarted     func(sessionID string)
 	OnBusy        func(holderName string, canTakeover bool)
+	OnServerState func(state ServerStatePayload)
 	OnState       func(sessionID, state string)
 	OnCommitted   func(sessionID, text string, perf CommitPerf)
 	OnProvisional func(sessionID, text string)
@@ -313,6 +314,12 @@ func (c *Client) dispatch(lc *liveConn, m Message) {
 	case *SessionBusyPayload:
 		if h := c.cfg.Handlers.OnBusy; h != nil {
 			h(p.HolderName, p.CanTakeover)
+		}
+	case *ServerStatePayload:
+		// Unsolicited availability (SERVER_STATE, v1.1). Advisory: the tray records it so a later
+		// window can show "phone taken"; it never gates a session on its own.
+		if h := c.cfg.Handlers.OnServerState; h != nil {
+			h(*p)
 		}
 	case *StateChangedPayload:
 		if h := c.cfg.Handlers.OnState; h != nil {

@@ -243,6 +243,9 @@ func runClient(addr, pin, token string, once bool, seconds float64, timeout time
 		h.OnBusy = func(name string, canTakeover bool) {
 			fmt.Printf("[busy] held by %s (takeover=%v)\n", name, canTakeover)
 		}
+		h.OnServerState = func(s core.ServerStatePayload) {
+			fmt.Printf("[phone] %s (holder %q)\n", s.State, s.HolderName)
+		}
 		h.OnState = func(id, state string) { fmt.Printf("[state] %s\n", state) }
 		h.OnCommitted = func(id, text string, perf core.CommitPerf) {
 			fmt.Printf("[commit] %q (asr=%dms cleanup=%dms)\n", text, perf.AsrMs, perf.CleanupMs)

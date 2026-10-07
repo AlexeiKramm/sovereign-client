@@ -49,6 +49,10 @@ func fakePhone(t *testing.T, observeHello func(*HelloPayload)) *httptest.Server 
 		// An unknown type must be ignored, not fatal (§3).
 		_ = ws.Write(ctx, websocket.MessageText,
 			[]byte(`{"v":1,"type":"FUTURE_THING","id":"x","ts":1,"payload":{}}`))
+		// An unsolicited availability frame (SERVER_STATE, v1.1) must reach OnServerState.
+		_ = writeMsg(ctx, ws, mustMessageType("SERVER_STATE"), &ServerStatePayload{
+			State: ServerStateReserved, HolderDeviceID: "phone-1", HolderName: "Test Phone",
+		})
 
 		for {
 			m, err := readMsg(ctx, ws)
@@ -99,6 +103,7 @@ func TestClientAuthenticatesAndDrivesSession(t *testing.T) {
 	conn := make(chan ConnState, 16)
 	commits := make(chan string, 8)
 	delivered := make(chan string, 4)
+	phone := make(chan ServerStatePayload, 4)
 
 	client := NewClient(ClientConfig{
 		Addr:  hostOf(t, server.URL),
@@ -106,9 +111,10 @@ func TestClientAuthenticatesAndDrivesSession(t *testing.T) {
 		Ident: Identity{DeviceID: "desk-1", Name: "Desk"},
 		Creds: Credentials{Token: "tok", ServerSpki: pin},
 		Handlers: Handlers{
-			OnConn:      func(s ConnState, _ string) { conn <- s },
-			OnCommitted: func(_, text string, _ CommitPerf) { commits <- text },
-			OnUtterance: func(_, delivery, _, _ string) { delivered <- delivery },
+			OnConn:        func(s ConnState, _ string) { conn <- s },
+			OnCommitted:   func(_, text string, _ CommitPerf) { commits <- text },
+			OnUtterance:   func(_, delivery, _, _ string) { delivered <- delivery },
+			OnServerState: func(s ServerStatePayload) { phone <- s },
 		},
 		Logf: t.Logf,
 	})
@@ -121,6 +127,16 @@ func TestClientAuthenticatesAndDrivesSession(t *testing.T) {
 	waitState(t, conn, StateReady)
 	if hello == nil || hello.Token != "tok" || hello.DeviceID != "desk-1" || hello.Protover != Version {
 		t.Fatalf("HELLO = %+v", hello)
+	}
+
+	// The phone advertised its pipeline availability right after WELCOME; the client must surface it.
+	select {
+	case s := <-phone:
+		if s.State != ServerStateReserved || s.HolderName != "Test Phone" || s.HolderDeviceID != "phone-1" {
+			t.Fatalf("SERVER_STATE = %+v", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SERVER_STATE delivered to OnServerState")
 	}
 
 	if err := client.StartDictation(ctx, ModeHold); err != nil {
