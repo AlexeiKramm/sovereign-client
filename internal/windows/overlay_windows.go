@@ -180,7 +180,7 @@ func (o *Overlay) Close() error {
 	hwnd := o.hwnd
 	o.mu.Unlock()
 	if hwnd != 0 {
-		procPostMessageW.Call(hwnd, wmClose, 0, 0)
+		procPostMessageW.Call(hwnd, wmOverlayQuit, 0, 0)
 	}
 	<-o.done
 	return nil
@@ -285,14 +285,15 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		return 0
 	case wmNCHitTest:
 		if o.interactive {
-			// Click-through outside the card so the transparent shadow margin does not swallow
-			// clicks meant for the window behind it.
+			// WM_NCHITTEST's lParam is in SCREEN coordinates; the hit rect is client-relative, so
+			// convert before comparing. Comparing screen coords directly made every point look
+			// "outside", which returned HTTRANSPARENT everywhere and made the panel click-through.
 			o.mu.Lock()
 			hr := o.hitRect
 			o.mu.Unlock()
-			x := int(int16(lparam & 0xffff))
-			y := int(int16((lparam >> 16) & 0xffff))
-			if x < hr.X || y < hr.Y || x >= hr.X+hr.W || y >= hr.Y+hr.H {
+			pt := point{X: int32(int16(lparam & 0xffff)), Y: int32(int16((lparam >> 16) & 0xffff))}
+			procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
+			if int(pt.X) < hr.X || int(pt.Y) < hr.Y || int(pt.X) >= hr.X+hr.W || int(pt.Y) >= hr.Y+hr.H {
 				return ^uintptr(0) // HTTRANSPARENT (-1)
 			}
 			return htClient
@@ -306,10 +307,19 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		return maNoActivate
 	case wmMouseMove, wmLButtonDown, wmLButtonUp:
 		if o.interactive && o.onMouse != nil {
+			kind := mouseKind(uint32(message))
+			// Capture the mouse for the duration of a press, so a drag keeps delivering moves even
+			// when the cursor leaves the (small) window.
+			switch kind {
+			case MouseDown:
+				procSetCapture.Call(hwnd)
+			case MouseUp:
+				procReleaseCapture.Call()
+			}
 			o.onMouse(MouseEvent{
 				X:    int(int16(lparam & 0xffff)),
 				Y:    int(int16((lparam >> 16) & 0xffff)),
-				Kind: mouseKind(uint32(message)),
+				Kind: kind,
 			})
 			return 0
 		}
@@ -318,10 +328,16 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 			return 0
 		}
 	case wmClose:
+		// The system close gesture (Alt+F4, the system menu). Let the controller decide; do NOT
+		// destroy here, because Close() must be able to tear the window down deterministically.
 		if o.interactive && o.onClose != nil {
 			o.onClose()
 			return 0
 		}
+	case wmOverlayQuit:
+		// Close() asks for a real teardown: destroy the window so WM_DESTROY ends the message loop.
+		procDestroyWindow.Call(hwnd)
+		return 0
 	case wmDestroy:
 		procPostQuitMessage.Call(0)
 		return 0
@@ -557,6 +573,7 @@ const (
 
 	wmApp          = 0x8000
 	wmOverlayApply = wmApp + 1
+	wmOverlayQuit  = wmApp + 2
 
 	maActivate   = 2
 	maNoActivate = 3
@@ -646,6 +663,10 @@ var (
 	procShowWindow                    = user32.NewProc("ShowWindow")
 	procSetWindowPos                  = user32.NewProc("SetWindowPos")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
+	procDestroyWindow                 = user32.NewProc("DestroyWindow")
+	procScreenToClient                = user32.NewProc("ScreenToClient")
+	procSetCapture                    = user32.NewProc("SetCapture")
+	procReleaseCapture                = user32.NewProc("ReleaseCapture")
 	procGetDC                         = user32.NewProc("GetDC")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procReleaseDC                     = user32.NewProc("ReleaseDC")

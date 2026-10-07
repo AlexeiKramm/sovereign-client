@@ -11,6 +11,7 @@ import (
 )
 
 var procIsWindowVisibleTest = user32.NewProc("IsWindowVisible")
+var procSendMessageTest = user32.NewProc("SendMessageW")
 
 // TestOverlayStructLayouts pins the Win32 struct sizes the layered window depends on. A wrong
 // BITMAPINFOHEADER or BLENDFUNCTION size makes UpdateLayeredWindow fail or read garbage; a wrong
@@ -94,6 +95,7 @@ func TestPanelInteracts(t *testing.T) {
 	}
 	mouse := make(chan MouseEvent, 4)
 	keys := make(chan uint32, 4)
+	closed := make(chan struct{}, 1)
 	o, err := StartPanel(PanelOptions{
 		OnMouse: func(ev MouseEvent) {
 			select {
@@ -108,11 +110,16 @@ func TestPanelInteracts(t *testing.T) {
 			}
 			return vk == 0x1B
 		},
+		OnClose: func() {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("StartPanel: %v", err)
 	}
-	defer o.Close()
 
 	img := image.NewRGBA(image.Rect(0, 0, 200, 120))
 	for i := 3; i < len(img.Pix); i += 4 {
@@ -128,6 +135,22 @@ func TestPanelInteracts(t *testing.T) {
 		t.Fatal("panel window is not visible after Present")
 	}
 
+	// WM_NCHITTEST carries SCREEN coordinates and must be converted to client coordinates before
+	// comparing to the hit rect: a point over the card is HTCLIENT, a point in the transparent
+	// shadow margin is HTTRANSPARENT (so it does not block the window behind it). Getting this wrong
+	// makes the whole panel click-through.
+	hitTest := func(screenX, screenY int) uintptr {
+		lp := uintptr(uint16(screenX)) | uintptr(uint16(screenY))<<16
+		r, _, _ := procSendMessageTest.Call(o.hwnd, wmNCHitTest, 0, lp)
+		return r
+	}
+	if got := hitTest(60+5, 60+5); got != htClient {
+		t.Fatalf("WM_NCHITTEST over the card = %d, want HTCLIENT (%d)", got, htClient)
+	}
+	if got := hitTest(60+5, 60+300); got != ^uintptr(0) {
+		t.Fatalf("WM_NCHITTEST below the card = %d, want HTTRANSPARENT", got)
+	}
+
 	// Post a left-button-down at client (30, 20): the window must decode the packed lParam.
 	lparam := uintptr(30) | uintptr(20)<<16
 	procPostMessageW.Call(o.hwnd, wmLButtonDown, 0, lparam)
@@ -138,6 +161,16 @@ func TestPanelInteracts(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no mouse event reached the callback")
+	}
+	// Release, so the window does not keep the mouse captured for the rest of the test.
+	procPostMessageW.Call(o.hwnd, wmLButtonUp, 0, lparam)
+	select {
+	case ev := <-mouse:
+		if ev.Kind != MouseUp {
+			t.Fatalf("mouse event = %+v, want MouseUp", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no mouse-up event reached the callback")
 	}
 
 	procPostMessageW.Call(o.hwnd, wmKeyDown, 0x1B, 0)
@@ -150,9 +183,23 @@ func TestPanelInteracts(t *testing.T) {
 		t.Fatal("no key event reached the callback")
 	}
 
-	o.Hide()
-	time.Sleep(150 * time.Millisecond)
-	if r, _, _ := procIsWindowVisibleTest.Call(o.hwnd); r != 0 {
-		t.Fatal("panel window is still visible after Hide")
+	// The system close gesture reaches OnClose, and Close() must still tear the window down even
+	// with an OnClose handler installed — otherwise the message loop never ends and the app hangs
+	// on quit.
+	procPostMessageW.Call(o.hwnd, wmClose, 0, 0)
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WM_CLOSE did not reach OnClose")
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = o.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close() hung: the window thread did not exit")
 	}
 }
