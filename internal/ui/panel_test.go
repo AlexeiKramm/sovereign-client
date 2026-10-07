@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/alexeikramm/sovereign-desktop/internal/core"
 	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
 )
 
@@ -140,4 +141,56 @@ func optionOn(r *render.Row, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestAvailabilityText pins the wording the control window shows for the phone's advertised
+// availability (SERVER_STATE, v1.1), including the phone's own name for a phone-local capture and
+// the "another desktop" placeholder the phone sends for a session it cannot name.
+func TestAvailabilityText(t *testing.T) {
+	cases := []struct {
+		in   core.ServerStatePayload
+		want string
+	}{
+		{core.ServerStatePayload{State: core.ServerStateIdle}, ""},
+		{core.ServerStatePayload{State: core.ServerStateReserved, HolderName: "Phone"},
+			"Phone busy — the phone's pill is dictating"},
+		{core.ServerStatePayload{State: core.ServerStateBusy, HolderName: "another desktop"},
+			"Phone busy — another desktop is dictating"},
+		{core.ServerStatePayload{State: core.ServerStateBusy, HolderName: "Laptop"},
+			"Phone busy — Laptop is dictating"},
+	}
+	for _, c := range cases {
+		if got := availabilityText(c.in); got != c.want {
+			t.Errorf("availabilityText(%+v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestBusyMessage pins the pill's refusal wording, shared with the panel.
+func TestBusyMessage(t *testing.T) {
+	if got := busyMessage(""); got != "Phone busy" {
+		t.Errorf("busyMessage(\"\") = %q", got)
+	}
+	if got := busyMessage("another desktop"); got != "Phone busy — another desktop is dictating" {
+		t.Errorf("busyMessage(another desktop) = %q", got)
+	}
+	if got := busyMessage("Phone"); got != "Phone busy — Phone is dictating" {
+		t.Errorf("busyMessage(Phone) = %q", got)
+	}
+}
+
+// TestPanelInfoShowsAvailability checks the availability line leads the footer while the phone is
+// taken, and disappears when it is idle.
+func TestPanelInfoShowsAvailability(t *testing.T) {
+	a := &app{}
+	a.phoneState = core.ServerStatePayload{State: core.ServerStateReserved, HolderName: "Phone"}
+	info := a.panelInfo()
+	if len(info) == 0 || info[0] != "Phone busy — the phone's pill is dictating" {
+		t.Fatalf("panelInfo = %q, want the availability line first", info)
+	}
+
+	a.phoneState = core.ServerStatePayload{}
+	if info := a.panelInfo(); len(info) != 1 || info[0] != "Sessions 0" {
+		t.Fatalf("panelInfo when idle = %q, want only the session count", info)
+	}
 }

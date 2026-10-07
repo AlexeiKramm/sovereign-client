@@ -218,16 +218,21 @@ func (a *app) repaintPanel() {
 	ov.Present(p.Frame.Img, pos[0]-p.Frame.Pad, pos[1]-p.Frame.Pad)
 }
 
-// panelInfo builds the footer lines: the last utterance's ASR/cleanup timings, the link RTT and the
-// session count. Empty values are omitted so the footer never reserves space it does not use.
+// panelInfo builds the footer lines: the phone's advertised availability, the last utterance's
+// ASR/cleanup timings, the link RTT and the session count. Empty values are omitted so the footer
+// never reserves space it does not use.
 func (a *app) panelInfo() []string {
 	a.mu.Lock()
 	asr, cleanup := a.lastAsrMs, a.lastCleanupMs
 	latency := a.lastLatency
 	sessions := a.sessionCount
+	phone := a.phoneState
 	a.mu.Unlock()
 
 	var info []string
+	if t := availabilityText(phone); t != "" {
+		info = append(info, t)
+	}
 	if asr > 0 || cleanup > 0 {
 		info = append(info, fmt.Sprintf("Last ASR %d ms · Cleanup %d ms", asr, cleanup))
 	}
@@ -236,6 +241,34 @@ func (a *app) panelInfo() []string {
 	}
 	info = append(info, fmt.Sprintf("Sessions %d", sessions))
 	return info
+}
+
+// availabilityText describes the phone's advertised pipeline availability (SERVER_STATE, v1.1). It
+// is empty when the phone is idle, so the caller can omit the line. It is advisory only: the reply
+// to a START_DICTATION stays authoritative (PROTOCOL.md §5).
+func availabilityText(s core.ServerStatePayload) string {
+	switch s.State {
+	case core.ServerStateReserved:
+		return "Phone busy — the phone's pill is dictating"
+	case core.ServerStateBusy:
+		return busyMessage(s.HolderName)
+	default:
+		return ""
+	}
+}
+
+// busyMessage names the holder in a refusal, for both the panel footer (SERVER_STATE) and the pill
+// (SESSION_BUSY). The phone names itself for a phone-local capture and sends the placeholder
+// "another desktop" for a desktop session it cannot name.
+func busyMessage(holder string) string {
+	switch holder {
+	case "":
+		return "Phone busy"
+	case "another desktop":
+		return "Phone busy — another desktop is dictating"
+	default:
+		return "Phone busy — " + holder + " is dictating"
+	}
 }
 
 // onPanelMouse handles clicks and drags. It runs on the window thread, so it never blocks: a control

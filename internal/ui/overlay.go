@@ -2,6 +2,7 @@ package ui
 
 import (
 	"math"
+	"time"
 
 	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
 	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
@@ -37,6 +38,32 @@ func (a *app) startPill() {
 	a.pillMu.Unlock()
 	a.watchEsc()
 	a.repaintPill()
+}
+
+// showBusyPill shows the pill briefly with a refusal message, so a hotkey press the phone refuses
+// is visible where the user is looking (the phone's own pill shows a BUSY mark, CHUNK-7). It is
+// replaced by a real session if one starts, and auto-hides otherwise.
+func (a *app) showBusyPill(msg string) {
+	ov := a.ensureOverlay()
+	if ov == nil {
+		return
+	}
+	a.pillMu.Lock()
+	a.pill = pillView{status: msg, shown: true, err: true}
+	a.pillMu.Unlock()
+	a.repaintPill()
+
+	time.AfterFunc(2*time.Second, func() {
+		a.pillMu.Lock()
+		stale := a.pill.shown && a.pill.err && a.pill.status == msg
+		if stale {
+			a.pill.shown = false
+		}
+		a.pillMu.Unlock()
+		if stale {
+			ov.Hide()
+		}
+	})
 }
 
 // hidePill takes the overlay down and stops the Esc watcher. It is idempotent.

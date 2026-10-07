@@ -9,8 +9,9 @@ text at your cursor when you stop. No audio and no keystrokes ever touch your do
 > `wss://`, mutual-accept pairing, DPAPI token storage, self-healing reconnect, heartbeat and
 > latency logging — are implemented and host-tested. The tray and its lifecycle (state icon,
 > pairing, settings, single-instance, autostart), the global hold/toggle hotkeys with `SendInput`
-> injection, the floating pill overlay, and the control window — which holds the settings. The
-> remaining work is Chunk 8b (surfacing the phone's availability in the pill) and polishing.
+> injection, the floating pill overlay, and the control window — which holds the settings — are all
+> in. The phone's advertised availability (`SERVER_STATE`) is surfaced in the control window and on
+> a refused dictation. What remains is polishing.
 
 ## Where the docs live
 
@@ -73,6 +74,13 @@ recognised in grey — the same split as the phone's card. The pill is a layered
 click-through, never takes focus from the field you are dictating into, and is dismissed by **Esc**
 (which ends the session without inserting) or by ending dictation. Its status line tracks the phone
 (`Warming up…` → `Listening…` → `Finishing…`).
+
+If the phone is already taken — its own pill is dictating, or another desktop is — the phone refuses
+the session and the pill shows **Phone busy — …** for a couple of seconds instead of listening, the
+same way the phone's own pill marks a refused tap. The desktop deliberately *asks anyway* rather
+than trusting its cached copy of the phone's state: the reply to `START_DICTATION` is authoritative,
+so a stale "busy" can never block a dictation that would succeed. The control window's footer shows
+the phone's advertised availability while it is open.
 
 **The control window** opens on a left click of the tray icon (or **Open control panel** in its
 menu) — systray reports a single tap, not a double-click. It shows the same live transcript in a

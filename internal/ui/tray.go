@@ -334,6 +334,9 @@ func (a *app) handlers() core.Handlers {
 			a.setState(StateError, "phone busy ("+holder+")")
 			a.setPanelStatus("Phone busy (" + holder + ")")
 			a.hidePill()
+			// The refusal is authoritative, so show it where the user is looking: the pill, for a
+			// couple of seconds, the same way the phone's own pill marks a refused tap.
+			a.showBusyPill(busyMessage(holder))
 			a.signalSmartReset()
 		},
 		OnServerState: func(s core.ServerStatePayload) {
@@ -448,10 +451,11 @@ func (a *app) isDictating() bool {
 	return a.dictating
 }
 
-// setPhoneState records the phone's advertised pipeline availability (SERVER_STATE, v1.1). It is
-// advisory and deliberately has **no tray rendering yet**: the "phone taken" response belongs in the
-// desktop pill window (4c/4d), which does not exist. It is stored so that window can read it, and
-// logged so the state is observable meanwhile (CHUNK-8).
+// setPhoneState records the phone's advertised pipeline availability (SERVER_STATE, v1.1) and
+// repaints the control window, whose footer shows it. It is advisory, so it is **not** used to
+// short-circuit a hotkey: the reply to START_DICTATION stays authoritative (PROTOCOL.md §5), which
+// avoids refusing a dictation over a stale "busy" from a session that has just ended. A refusal
+// shows up as the pill's busy message (OnBusy).
 func (a *app) setPhoneState(s core.ServerStatePayload) {
 	a.mu.Lock()
 	a.phoneState = s
@@ -461,10 +465,11 @@ func (a *app) setPhoneState(s core.ServerStatePayload) {
 	} else {
 		a.logf("phone availability: %s (holder %q)", s.State, s.HolderName)
 	}
+	a.refreshPanel()
 }
 
 // phoneAvailability returns the last advertised availability; the zero value (IDLE) before any
-// frame arrives. Read by the future desktop pill window when it decides how to respond to a hotkey.
+// frame arrives. The control window reads it for its footer.
 func (a *app) phoneAvailability() core.ServerStatePayload {
 	a.mu.Lock()
 	defer a.mu.Unlock()
