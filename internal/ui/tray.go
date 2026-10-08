@@ -102,6 +102,9 @@ type app struct {
 	accentDropdownOpen bool
 	panelActiveTab     int
 	panelCopiedID      string
+	panelPressID       string // control where the current press began
+	panelPressedID     string // control currently under the held pointer (drawn highlighted)
+	panelPressing      bool   // a control press is in progress
 
 	// Panel footer telemetry, guarded by mu.
 	lastAsrMs     int64
@@ -145,6 +148,9 @@ func (a *app) onReady() {
 	a.resolveKick = make(chan struct{}, 1)
 	a.buildMenu(paired)
 	a.setState(StateOffline, "starting")
+	// Warm the pill overlay so the first dictation's pill has no window-creation cost on top of the
+	// (now eliminated) wait for the phone's acknowledgement.
+	go a.ensureOverlay()
 	a.logf("tray ready; paired=%v", paired)
 	if paired {
 		// The first connect runs the full ladder once to learn the phone's address. After that the
@@ -497,6 +503,9 @@ func (a *app) startPendingDictation() {
 		a.signalSmartReset()
 		return
 	}
+	// The link is up: switch the connecting pill to Listening… now rather than waiting for the
+	// acknowledgement.
+	a.startPill()
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("dictation start failed: %v", err)
 		a.showErrorPill("Dictation start failed")
@@ -675,6 +684,7 @@ func (a *app) testDictation() {
 		return
 	}
 	a.captureTarget()
+	a.startPill()
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("test dictation start: %v", err)
 		return
@@ -905,6 +915,9 @@ func (a *app) startDictation() {
 		return
 	}
 
+	// Open the pill now rather than waiting for the phone's START acknowledgement, so it feels
+	// instant. OnStarted will confirm it; a refusal (OnBusy/OnError) replaces it with feedback.
+	a.startPill()
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("dictation start failed: %v", err)
 		a.showErrorPill("Dictation start failed")
@@ -1143,9 +1156,10 @@ func (a *app) setMode(m string) {
 	a.settings.Mode = m
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
-	a.rearmHotkey()
 	a.refreshPanel()
+	a.rearmHotkey()
+	// Persist last: the disk write must not sit between the click and the visible change.
+	a.persist(s)
 }
 
 // applyHotkey stores a hotkey (from the panel's capture) and re-arms the watcher.
@@ -1154,9 +1168,9 @@ func (a *app) applyHotkey(spec string) {
 	a.settings.Hotkey = spec
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
-	a.rearmHotkey()
 	a.refreshPanel()
+	a.rearmHotkey()
+	a.persist(s)
 }
 
 func (a *app) setInsertion(m string) {
@@ -1164,8 +1178,8 @@ func (a *app) setInsertion(m string) {
 	a.settings.Insertion = m
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
 	a.refreshPanel()
+	a.persist(s)
 }
 
 func (a *app) setPosition(p string) {
@@ -1173,8 +1187,8 @@ func (a *app) setPosition(p string) {
 	a.settings.OverlayPosition = p
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
 	a.refreshPanel()
+	a.persist(s)
 }
 
 func (a *app) setThemeMode(m string) {
@@ -1182,9 +1196,9 @@ func (a *app) setThemeMode(m string) {
 	a.settings.ThemeMode = m
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
 	a.refreshPanel()
 	a.repaintPill()
+	a.persist(s)
 }
 
 func (a *app) setThemePreset(p string) {
@@ -1192,9 +1206,9 @@ func (a *app) setThemePreset(p string) {
 	a.settings.ThemePreset = p
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
 	a.refreshPanel()
 	a.repaintPill()
+	a.persist(s)
 }
 
 func (a *app) themePreset() string {
@@ -1243,13 +1257,13 @@ func (a *app) toggleDebug() {
 	on := a.settings.Debug
 	s := a.settings
 	a.mu.Unlock()
+	a.refreshPanel()
 	a.persist(s)
 	if on {
 		a.logf("transcript logging enabled (debug)")
 	} else {
 		a.logf("transcript logging disabled")
 	}
-	a.refreshPanel()
 }
 
 func (a *app) startupEnabled() bool {

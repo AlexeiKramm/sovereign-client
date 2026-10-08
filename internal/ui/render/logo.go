@@ -159,29 +159,22 @@ func DrawSovereignLogo(dst *image.RGBA, x, y, size float64) {
 		}
 	}
 
-	// 2. Vector rasterize the 3-Tier Dreadnought stencil in white.
-	b := dst.Bounds()
-	var z vector.Rasterizer
-	z.Reset(b.Dx(), b.Dy())
-
-	sx := float32(size) / 108.0
-	sy := float32(size) / 108.0
-	ox := float32(x)
-	oy := float32(y)
-
-	for _, poly := range dreadnoughtPolygons {
-		if len(poly) < 3 {
-			continue
-		}
-		z.MoveTo(ox+poly[0].X*sx, oy+poly[0].Y*sy)
-		for _, pt := range poly[1:] {
-			z.LineTo(ox+pt.X*sx, oy+pt.Y*sy)
-		}
-		z.ClosePath()
-	}
-
+	// 2. Rasterize the 3-Tier Dreadnought stencil in white, bounded to the logo box.
 	stencilCol := color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
-	z.Draw(dst, b, image.NewUniform(stencilCol), image.Point{})
+	fillPathUniform(dst, clip, stencilCol, func(z *vector.Rasterizer, ox, oy float64) {
+		s := float32(size) / 108.0
+		lx, ly := float32(x-ox), float32(y-oy)
+		for _, poly := range dreadnoughtPolygons {
+			if len(poly) < 3 {
+				continue
+			}
+			z.MoveTo(lx+poly[0].X*s, ly+poly[0].Y*s)
+			for _, pt := range poly[1:] {
+				z.LineTo(lx+pt.X*s, ly+pt.Y*s)
+			}
+			z.ClosePath()
+		}
+	})
 }
 
 // RenderSovereignLogo returns a standalone square image of the Sovereign brand mark.

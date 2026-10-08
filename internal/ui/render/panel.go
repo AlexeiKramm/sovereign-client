@@ -86,9 +86,10 @@ const (
 // Control is one interactive region, in the panel image's client coordinates (device pixels,
 // including the transparent shadow margin), so a mouse event maps to it directly.
 type Control struct {
-	ID   string
-	Kind ControlKind
-	Rect image.Rectangle
+	ID     string
+	Kind   ControlKind
+	Rect   image.Rectangle
+	Radius float64 // corner radius, so a press highlight follows the control's shape
 }
 
 // RowKind is the kind of settings row.
@@ -253,7 +254,10 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	cx, cy := 0.0, 0.0
 	fillRoundRect(img, cx, cy, cardW, cardH, panelRadius*scale, theme.Border)
 	bw := panelBorder * scale
-	fillRoundRect(img, cx+bw, cy+bw, cardW-2*bw, cardH-2*bw, panelRadius*scale-bw, theme.Surface)
+	bgX, bgY := cx+bw, cy+bw
+	bgW, bgH := cardW-2*bw, cardH-2*bw
+	fillRoundRectGradient(img, bgX, bgY, bgW, bgH, panelRadius*scale-bw,
+		panelBackground(int(math.Round(bgW)), int(math.Round(bgH)), theme, m.Dark))
 
 	controls := make([]Control, 0, 16)
 	header := image.Rect(0, 0, totalW, int(math.Round(headerH)))
@@ -275,7 +279,7 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		int(math.Round((headerH+closeSz)/2)),
 	)
 	drawClose(img, closeRect, theme.OnSurfaceVariant, scale)
-	controls = append(controls, Control{ID: "close", Kind: ControlClose, Rect: closeRect})
+	controls = append(controls, Control{ID: "close", Kind: ControlClose, Rect: closeRect, Radius: closeSz / 2})
 
 	// Separator under the header.
 	sepY := cy + headerH + 6*scale
@@ -336,7 +340,34 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		}
 	}
 
+	// Press feedback is composited by the controller over the cached frame (WithPressHighlight), so
+	// no press scrim is drawn into the base render.
+
 	return Panel{Frame: Frame{Img: img, Pad: 0}, Controls: controls, Header: header}, nil
+}
+
+// WithPressHighlight returns img unchanged when no control is pressed, otherwise a copy with the
+// press scrim composited over the held control. The controller uses it to update the highlight the
+// instant a press or release happens, without re-rendering the whole panel.
+func WithPressHighlight(img *image.RGBA, controls []Control, pressedID string, dark bool) *image.RGBA {
+	if pressedID == "" || img == nil {
+		return img
+	}
+	for _, c := range controls {
+		if c.ID != pressedID {
+			continue
+		}
+		out := image.NewRGBA(img.Bounds())
+		copy(out.Pix, img.Pix)
+		scrim := premul(0xFF, 0xFF, 0xFF, 0x38)
+		if !dark {
+			scrim = premul(0x00, 0x00, 0x00, 0x24)
+		}
+		fillRoundRect(out, float64(c.Rect.Min.X), float64(c.Rect.Min.Y),
+			float64(c.Rect.Dx()), float64(c.Rect.Dy()), c.Radius, scrim)
+		return out
+	}
+	return img
 }
 
 // historyItemWords builds the styled words for a history card based on its ViewMode (Clean, Raw, Diff).
@@ -452,7 +483,7 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 	out = append(out, Control{ID: "copy:" + item.ID, Kind: ControlButton, Rect: image.Rect(
 		int(math.Round(copyX)), int(math.Round(btnY)),
 		int(math.Round(copyX+copyW)), int(math.Round(btnY+btnH)),
-	)})
+	), Radius: 6.0 * scale})
 
 	// Mode toggle button (Clean / Raw / Diff)
 	modeText := "Clean"
@@ -471,7 +502,7 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 	out = append(out, Control{ID: "histmode:" + item.ID, Kind: ControlButton, Rect: image.Rect(
 		int(math.Round(modeX)), int(math.Round(btnY)),
 		int(math.Round(modeX+modeW)), int(math.Round(btnY+btnH)),
-	)})
+	), Radius: 6.0 * scale})
 
 	// Body text with inline diff / strike-through support:
 	bodyTop := topY + topH + 8.0*scale
@@ -545,7 +576,7 @@ func drawTabBar(img *image.RGBA, activeTab int, x, y, w, h float64, scale float6
 	out = append(out, Control{ID: "tab:dictations", Kind: ControlButton, Rect: image.Rect(
 		int(math.Round(tab1X)), int(math.Round(tab1Y)),
 		int(math.Round(tab1X+tabW)), int(math.Round(tab1Y+tab1H)),
-	)})
+	), Radius: rad - 2.0*scale})
 
 	// Tab 2: Settings
 	tab2X := tab1X + tabW
@@ -561,7 +592,7 @@ func drawTabBar(img *image.RGBA, activeTab int, x, y, w, h float64, scale float6
 	out = append(out, Control{ID: "tab:settings", Kind: ControlButton, Rect: image.Rect(
 		int(math.Round(tab2X)), int(math.Round(tab1Y)),
 		int(math.Round(tab2X+tabW)), int(math.Round(tab1Y+tab1H)),
-	)})
+	), Radius: rad - 2.0*scale})
 
 	return out
 }
@@ -649,7 +680,7 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 				drawText(img, chipFace, theme.OnSurfaceVariant,
 					cx+rowChipPadX*scale, chipY+baseline(chipFace, chH), opt.Text)
 			}
-			out = append(out, Control{ID: opt.ID, Kind: ControlChip, Rect: rect})
+			out = append(out, Control{ID: opt.ID, Kind: ControlChip, Rect: rect, Radius: chH / 2})
 			cx += cw + rowChipGap*scale
 		}
 		return out
@@ -673,7 +704,8 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 		}
 		fillRoundRect(img, kxc-kr, sy+2*scale, kr*2, kr*2, kr, knob)
 		return []Control{{ID: r.ID, Kind: ControlToggle,
-			Rect: image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)))}}
+			Rect:   image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h))),
+			Radius: 8.0 * scale}}
 
 	case RowDropdown:
 		trigH := rowButtonH * scale
@@ -711,7 +743,8 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 
 		var out []Control
 		out = append(out, Control{ID: r.ID, Kind: ControlButton,
-			Rect: image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+trigH)))})
+			Rect:   image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+trigH))),
+			Radius: 10 * scale})
 
 		if r.On {
 			menuY := y + trigH + 4.0*scale
@@ -739,11 +772,7 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 				pCol := theme.Primary
 				for _, p := range Presets {
 					if p.ID == presetID {
-						if theme.Surface.R < 128 {
-							pCol = p.DarkPrim
-						} else {
-							pCol = p.LightPrim
-						}
+						pCol = p.Seed // the picker swatch shows the seed, as Android's does
 						break
 					}
 				}
@@ -766,7 +795,7 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 					drawText(img, chipFace, theme.OnSurface, nameX, iy+baseline(chipFace, itemH), opt.Text)
 				}
 
-				out = append(out, Control{ID: opt.ID, Kind: ControlButton, Rect: iRect})
+				out = append(out, Control{ID: opt.ID, Kind: ControlButton, Rect: iRect, Radius: 6 * scale})
 			}
 		}
 		return out
@@ -781,7 +810,8 @@ func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float
 			drawText(img, rowFace, theme.OnSurfaceVariant, x+w-12*scale-dw, y+baseline(rowFace, h), r.Detail)
 		}
 		return []Control{{ID: r.ID, Kind: ControlButton,
-			Rect: image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)))}}
+			Rect:   image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h))),
+			Radius: 10 * scale}}
 	}
 }
 
@@ -830,40 +860,40 @@ func trimInfo(lines []string) []string {
 
 // drawChevron draws a clean downward or upward pointing arrow centered at (cx, cy).
 func drawChevron(img *image.RGBA, cx, cy, sz float64, col color.RGBA, up bool) {
-	var z vector.Rasterizer
-	b := img.Bounds()
-	z.Reset(b.Dx(), b.Dy())
-	hw := float32(sz * 0.38)
-	hh := float32(sz * 0.22)
-	th := float32(1.5)
-	fcx, fcy := float32(cx), float32(cy)
-	if up {
-		hh = -hh
-	}
-	z.MoveTo(fcx-hw, fcy-hh)
-	z.LineTo(fcx, fcy+hh)
-	z.LineTo(fcx+hw, fcy-hh)
-	z.LineTo(fcx+hw, fcy-hh+th)
-	z.LineTo(fcx, fcy+hh+th)
-	z.LineTo(fcx-hw, fcy-hh+th)
-	z.ClosePath()
-	z.Draw(img, b, image.NewUniform(col), image.Point{})
+	d := sz + 2
+	bbox := image.Rect(int(math.Floor(cx-d)), int(math.Floor(cy-d)), int(math.Ceil(cx+d)), int(math.Ceil(cy+d)))
+	fillPathUniform(img, bbox, col, func(z *vector.Rasterizer, ox, oy float64) {
+		hw := float32(sz * 0.38)
+		hh := float32(sz * 0.22)
+		th := float32(1.5)
+		fcx, fcy := float32(cx-ox), float32(cy-oy)
+		if up {
+			hh = -hh
+		}
+		z.MoveTo(fcx-hw, fcy-hh)
+		z.LineTo(fcx, fcy+hh)
+		z.LineTo(fcx+hw, fcy-hh)
+		z.LineTo(fcx+hw, fcy-hh+th)
+		z.LineTo(fcx, fcy+hh+th)
+		z.LineTo(fcx-hw, fcy-hh+th)
+		z.ClosePath()
+	})
 }
 
 // drawCheckmark draws a crisp checkmark centered at (cx, cy).
 func drawCheckmark(img *image.RGBA, cx, cy, sz float64, col color.RGBA) {
-	var z vector.Rasterizer
-	b := img.Bounds()
-	z.Reset(b.Dx(), b.Dy())
-	th := float32(1.6)
-	fcx, fcy := float32(cx), float32(cy)
-	w, h := float32(sz*0.4), float32(sz*0.35)
-	z.MoveTo(fcx-w, fcy)
-	z.LineTo(fcx-w*0.2, fcy+h)
-	z.LineTo(fcx+w, fcy-h)
-	z.LineTo(fcx+w, fcy-h+th)
-	z.LineTo(fcx-w*0.2, fcy+h+th)
-	z.LineTo(fcx-w, fcy+th)
-	z.ClosePath()
-	z.Draw(img, b, image.NewUniform(col), image.Point{})
+	d := sz + 2
+	bbox := image.Rect(int(math.Floor(cx-d)), int(math.Floor(cy-d)), int(math.Ceil(cx+d)), int(math.Ceil(cy+d)))
+	fillPathUniform(img, bbox, col, func(z *vector.Rasterizer, ox, oy float64) {
+		th := float32(1.6)
+		fcx, fcy := float32(cx-ox), float32(cy-oy)
+		w, h := float32(sz*0.4), float32(sz*0.35)
+		z.MoveTo(fcx-w, fcy)
+		z.LineTo(fcx-w*0.2, fcy+h)
+		z.LineTo(fcx+w, fcy-h)
+		z.LineTo(fcx+w, fcy-h+th)
+		z.LineTo(fcx-w*0.2, fcy+h+th)
+		z.LineTo(fcx-w, fcy+th)
+		z.ClosePath()
+	})
 }

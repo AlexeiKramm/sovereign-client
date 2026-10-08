@@ -358,10 +358,13 @@ func drawShadow(img *image.RGBA, x, y, w, h, radius float64, spread int, scale f
 	}
 }
 
-// fillRoundRect fills a rounded rectangle with the antialiased vector rasterizer. DrawOp is Over
-// after Reset, so it composites rather than replaces.
+// fillRoundRect fills an anti-aliased rounded rectangle by compositing col with per-pixel coverage
+// from a signed-distance field. It touches only the rect's bounding box. The previous vector-based
+// version reset its rasterizer to the whole image and scanned every pixel for every fill, which
+// dominated a panel repaint; this is the hot path, so it stays allocation-free and fast-paths the
+// flat interior (coverage 1, no square root, and an opaque fill is a direct store).
 func fillRoundRect(img *image.RGBA, x, y, w, h, r float64, col color.RGBA) {
-	if w <= 0 || h <= 0 {
+	if w <= 0 || h <= 0 || col.A == 0 {
 		return
 	}
 	if r > w/2 {
@@ -370,21 +373,124 @@ func fillRoundRect(img *image.RGBA, x, y, w, h, r float64, col color.RGBA) {
 	if r > h/2 {
 		r = h / 2
 	}
+	x0, y0, x1, y1 := roundedRectBounds(img.Bounds(), x, y, w, h)
+	// The inner rectangle whose pixels are entirely inside the perimeter, so coverage is 1 there.
+	ix0, iy0, ix1, iy1 := roundRectCore(x0, y0, x1, y1, x, y, w, h, r)
+	opaque := col.A == 0xFF
+	for py := y0; py < y1; py++ {
+		coreRow := py >= iy0 && py < iy1
+		for px := x0; px < x1; px++ {
+			if coreRow && px >= ix0 && px < ix1 {
+				off := img.PixOffset(px, py)
+				if opaque {
+					img.Pix[off] = col.R
+					img.Pix[off+1] = col.G
+					img.Pix[off+2] = col.B
+					img.Pix[off+3] = 0xFF
+				} else {
+					blendPixel(img, px, py, col, 1)
+				}
+				continue
+			}
+			if cov := roundedRectCoverage(px, py, x, y, w, h, r); cov > 0 {
+				blendPixel(img, px, py, col, cov)
+			}
+		}
+	}
+}
+
+// roundedRectBounds returns the integer pixel box a rect can affect, expanded by 1px for the
+// anti-aliased edge and clipped to img.
+func roundedRectBounds(img image.Rectangle, x, y, w, h float64) (x0, y0, x1, y1 int) {
+	x0 = maxInt(int(math.Floor(x))-1, img.Min.X)
+	y0 = maxInt(int(math.Floor(y))-1, img.Min.Y)
+	x1 = minInt(int(math.Ceil(x+w))+1, img.Max.X)
+	y1 = minInt(int(math.Ceil(y+h))+1, img.Max.Y)
+	return
+}
+
+// roundRectCore returns the inner rectangle of a rounded rect whose pixels all have coverage 1, so
+// callers can fill it without the signed-distance edge math.
+func roundRectCore(x0, y0, x1, y1 int, x, y, w, h, r float64) (ix0, iy0, ix1, iy1 int) {
+	ix0 = maxInt(int(math.Ceil(x+r)), x0)
+	iy0 = maxInt(int(math.Ceil(y+r)), y0)
+	ix1 = minInt(int(math.Floor(x+w-r)), x1)
+	iy1 = minInt(int(math.Floor(y+h-r)), y1)
+	return
+}
+
+// roundedRectCoverage returns the anti-aliased coverage of the pixel centre (px+0.5, py+0.5):
+// 1 fully inside, 0 fully outside, a linear ramp across the 1px edge.
+func roundedRectCoverage(px, py int, x, y, w, h, r float64) float64 {
+	cx := x + w/2
+	cy := y + h/2
+	qx := math.Abs(float64(px)+0.5-cx) - (w/2 - r)
+	qy := math.Abs(float64(py)+0.5-cy) - (h/2 - r)
+	ax, ay := math.Max(qx, 0), math.Max(qy, 0)
+	d := math.Sqrt(ax*ax+ay*ay) + math.Min(math.Max(qx, qy), 0) - r
+	cov := 0.5 - d
+	switch {
+	case cov <= 0:
+		return 0
+	case cov >= 1:
+		return 1
+	default:
+		return cov
+	}
+}
+
+// blendPixel composites a premultiplied colour over the destination pixel, scaling its alpha by cov.
+// It uses fixed-point arithmetic: this runs once per pixel per fill, so it avoids float conversions.
+func blendPixel(img *image.RGBA, px, py int, col color.RGBA, cov float64) {
+	c := uint32(cov*255 + 0.5)
+	if c == 0 {
+		return
+	}
+	if c > 255 {
+		c = 255
+	}
+	off := img.PixOffset(px, py)
+	srcR := uint32(col.R) * c / 255
+	srcG := uint32(col.G) * c / 255
+	srcB := uint32(col.B) * c / 255
+	srcA := uint32(col.A) * c / 255
+	k := 255 - srcA
+	img.Pix[off] = uint8(srcR + uint32(img.Pix[off])*k/255)
+	img.Pix[off+1] = uint8(srcG + uint32(img.Pix[off+1])*k/255)
+	img.Pix[off+2] = uint8(srcB + uint32(img.Pix[off+2])*k/255)
+	img.Pix[off+3] = uint8(srcA + uint32(img.Pix[off+3])*k/255)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// fillPathUniform rasterizes the path built by build into img, bounded to bbox (clipped to img).
+// build receives the bbox origin to subtract from image coordinates, so the path lands in the
+// rasterizer's local space. Bounding the mask keeps a small glyph (a chevron, a checkmark, the logo
+// stencil) from allocating and scanning a full-image buffer, which dominated panel repaints.
+func fillPathUniform(img *image.RGBA, bbox image.Rectangle, col color.RGBA, build func(z *vector.Rasterizer, ox, oy float64)) {
+	if col.A == 0 {
+		return
+	}
+	bbox = bbox.Intersect(img.Bounds())
+	if bbox.Empty() {
+		return
+	}
 	var z vector.Rasterizer
-	b := img.Bounds()
-	z.Reset(b.Dx(), b.Dy())
-	fx, fy, fw, fh, fr := float32(x), float32(y), float32(w), float32(h), float32(r)
-	z.MoveTo(fx+fr, fy)
-	z.LineTo(fx+fw-fr, fy)
-	z.QuadTo(fx+fw, fy, fx+fw, fy+fr)
-	z.LineTo(fx+fw, fy+fh-fr)
-	z.QuadTo(fx+fw, fy+fh, fx+fw-fr, fy+fh)
-	z.LineTo(fx+fr, fy+fh)
-	z.QuadTo(fx, fy+fh, fx, fy+fh-fr)
-	z.LineTo(fx, fy+fr)
-	z.QuadTo(fx, fy, fx+fr, fy)
-	z.ClosePath()
-	z.Draw(img, b, image.NewUniform(col), image.Point{})
+	z.Reset(bbox.Dx(), bbox.Dy())
+	build(&z, float64(bbox.Min.X), float64(bbox.Min.Y))
+	z.Draw(img, bbox, image.NewUniform(col), image.Point{})
 }
 
 // drawText draws s with its baseline at (x, y).

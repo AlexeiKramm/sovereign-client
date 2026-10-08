@@ -224,6 +224,7 @@ func (a *app) repaintPanel() {
 	lastH := a.panelLastH
 	tab := a.panelActiveTab
 	copiedID := a.panelCopiedID
+	pressedID := a.panelPressedID
 	a.panelMu.Unlock()
 	if ov == nil || !view.shown {
 		return
@@ -247,6 +248,7 @@ func (a *app) repaintPanel() {
 
 	work, dpi := winplat.WorkArea(ov.Handle())
 	scale := float64(dpi) / 96.0
+	dark := a.isDarkTheme()
 	p, err := render.RenderPanel(render.PanelModel{
 		Title:       "Sovereign",
 		Status:      view.status,
@@ -259,7 +261,7 @@ func (a *app) repaintPanel() {
 		Info:        a.panelInfo(),
 		Version:     "v0.9.4",
 		Error:       view.err,
-		Dark:        a.isDarkTheme(),
+		Dark:        dark,
 		Preset:      a.themePreset(),
 		Scale:       scale,
 	})
@@ -278,7 +280,27 @@ func (a *app) repaintPanel() {
 	a.panelMu.Unlock()
 
 	ov.SetHitRect(winplat.Rect{X: p.Frame.Pad, Y: p.Frame.Pad, W: cw, H: ch})
-	ov.Present(p.Frame.Img, pos[0]-p.Frame.Pad, pos[1]-p.Frame.Pad)
+	// Composite the current press highlight (if any) over the fresh base render, so a background
+	// repaint while a control is held does not drop the highlight.
+	ov.Present(render.WithPressHighlight(p.Frame.Img, p.Controls, pressedID, dark), pos[0]-p.Frame.Pad, pos[1]-p.Frame.Pad)
+}
+
+// presentPanelPress updates only the press highlight: it composites the scrim over the last rendered
+// frame and hands that to the window, without re-rendering the panel. A click therefore reads back
+// instantly instead of after a full render.
+func (a *app) presentPanelPress() {
+	a.panelMu.Lock()
+	ov := a.panelWin
+	shown := a.panelContent.shown
+	layout := a.panelLayout
+	pos := a.panelPos
+	pressed := a.panelPressedID
+	a.panelMu.Unlock()
+	if ov == nil || !shown || layout.Frame.Img == nil {
+		return
+	}
+	img := render.WithPressHighlight(layout.Frame.Img, layout.Controls, pressed, a.isDarkTheme())
+	ov.Present(img, pos[0]-layout.Frame.Pad, pos[1]-layout.Frame.Pad)
 }
 
 // computePanelPos calculates the window position so that when its size changes (such as expanding
@@ -370,7 +392,9 @@ func busyMessage(holder string) string {
 }
 
 // onPanelMouse handles clicks and drags. It runs on the window thread, so it never blocks: a control
-// click is dispatched to a goroutine (some actions re-arm the hotkey, which starts a thread).
+// click is dispatched to a goroutine (some actions re-arm the hotkey, which starts a thread). A
+// press highlights the control immediately; it fires on release, and only if the pointer is still
+// over the control the press began on, so a click has visible feedback and a drag-off cancels it.
 func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	a.panelMu.Lock()
 	layout := a.panelLayout
@@ -380,7 +404,12 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	switch ev.Kind {
 	case winplat.MouseDown:
 		if c, ok := layout.ControlAt(ev.X, ev.Y); ok {
-			go a.panelAction(c)
+			a.panelMu.Lock()
+			a.panelPressing = true
+			a.panelPressID = c.ID
+			a.panelPressedID = c.ID
+			a.panelMu.Unlock()
+			a.presentPanelPress()
 			return
 		}
 		if layout.InHeader(ev.X, ev.Y) {
@@ -390,6 +419,24 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 			a.panelMu.Unlock()
 		}
 	case winplat.MouseMove:
+		a.panelMu.Lock()
+		pressing := a.panelPressing
+		a.panelMu.Unlock()
+		if pressing {
+			// Follow the pointer in and out of the pressed control so the highlight matches where a
+			// release would fire.
+			hover := ""
+			if c, ok := layout.ControlAt(ev.X, ev.Y); ok {
+				hover = c.ID
+			}
+			a.panelMu.Lock()
+			changed := a.panelPressedID != hover
+			a.panelPressedID = hover
+			a.panelMu.Unlock()
+			if changed {
+				a.presentPanelPress()
+			}
+		}
 		a.panelMu.Lock()
 		dragging := a.panelDragging
 		dx, dy := a.panelDragX, a.panelDragY
@@ -406,8 +453,20 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 		ov.Move(nx, ny)
 	case winplat.MouseUp:
 		a.panelMu.Lock()
+		pressID := a.panelPressID
+		pressing := a.panelPressing
+		a.panelPressID = ""
+		a.panelPressedID = ""
+		a.panelPressing = false
 		a.panelDragging = false
 		a.panelMu.Unlock()
+		if !pressing {
+			return
+		}
+		a.presentPanelPress()
+		if c, ok := layout.ControlAt(ev.X, ev.Y); ok && c.ID == pressID {
+			go a.panelAction(c)
+		}
 	}
 }
 
@@ -698,6 +757,6 @@ func (a *app) setFeedbackDuration(sec int) {
 	a.settings.FeedbackDurationSec = sec
 	s := a.settings
 	a.mu.Unlock()
-	a.persist(s)
 	a.refreshPanel()
+	a.persist(s)
 }

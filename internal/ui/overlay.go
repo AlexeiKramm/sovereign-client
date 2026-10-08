@@ -29,8 +29,11 @@ const pillMargin = 24.0
 // while the pill is up, exactly like the dictation hotkey.
 const escVK = 0x1B
 
-// startPill shows the overlay for a dictation that has just been accepted. It is called from the
-// client's reader goroutine, so it only touches the pill mutex and posts a frame.
+// startPill shows the overlay for a dictation. It is called the instant a dictation is requested
+// over a live link — before the phone acknowledges the session — so the pill appears without
+// waiting a network round-trip; the OnStarted/OnState frames only refine its status afterwards. It
+// may also be called again on acceptance, which is harmless. It runs on the caller's goroutine, so
+// it only touches the pill mutex and posts a frame.
 func (a *app) startPill() {
 	if a.ensureOverlay() == nil {
 		return
