@@ -302,9 +302,12 @@ func (a *app) watchEsc() {
 	}()
 }
 
-// cancelDictation discards an active session (no UTTERANCE_DONE, so nothing is injected); the phone
-// answers SESSION_RELEASED, which hides the pill. It also abandons a deferred dictation that is still
-// waiting for the link, so Esc on the "Connecting…" pill really cancels.
+// cancelDictation discards an active session (no UTTERANCE_DONE, so nothing is injected). The pill is
+// local feedback, so it is dismissed immediately rather than waiting for the phone's
+// SESSION_RELEASED — that network round-trip was the whole perceived latency of the Esc key. The
+// cancelled session still ends on the wire below, and the later SESSION_RELEASED handling is
+// idempotent. It also abandons a deferred dictation that is still waiting for the link, so Esc on the
+// "Connecting…" pill really cancels.
 func (a *app) cancelDictation() {
 	a.mu.Lock()
 	c := a.client
@@ -315,10 +318,23 @@ func (a *app) cancelDictation() {
 		a.pendingTest = false
 	}
 	a.mu.Unlock()
+
 	if pending && !ready {
+		// Released before the link came up: abandon the deferred dictation and drop the pill.
 		a.hidePill()
+		a.signalSmartReset()
 		return
 	}
+
+	// End it locally now, mirroring what OnReleased would do minus the round-trip, so Esc dismisses
+	// the pill with no perceptible delay. The hide goes first so nothing (tray update included) sits
+	// between the keypress and the pill leaving the screen; resetting the dictating flag and the
+	// smart-mode machine then lets the very next hotkey press start a fresh dictation.
+	a.hideListeningPill()
+	a.setDictating(false)
+	a.setState(StateReady, "")
+	a.signalSmartReset()
+
 	if c == nil {
 		return
 	}
