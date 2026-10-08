@@ -49,6 +49,8 @@ func (a *app) closePanel() {
 	a.panelContent.shown = false
 	a.accentDropdownOpen = false
 	a.panelUserMoved = false
+	a.panelScroll = 0
+	a.panelExpanded = nil
 	ov := a.panelWin
 	a.panelMu.Unlock()
 	if ov != nil {
@@ -225,6 +227,13 @@ func (a *app) repaintPanel() {
 	tab := a.panelActiveTab
 	copiedID := a.panelCopiedID
 	pressedID := a.panelPressedID
+	scroll := a.panelScroll
+	expanded := make(map[string]bool, len(a.panelExpanded))
+	for id, on := range a.panelExpanded {
+		if on {
+			expanded[id] = true
+		}
+	}
 	a.panelMu.Unlock()
 	if ov == nil || !view.shown {
 		return
@@ -242,6 +251,7 @@ func (a *app) repaintPanel() {
 				AsrMs:     it.AsrMs,
 				CleanupMs: it.CleanupMs,
 				ViewMode:  it.ViewMode,
+				Expanded:  expanded[it.ID],
 			})
 		}
 	}
@@ -264,6 +274,8 @@ func (a *app) repaintPanel() {
 		Dark:        dark,
 		Preset:      a.themePreset(),
 		Scale:       scale,
+		MaxHeight:   maxPanelHeight(work, dpi),
+		Scroll:      scroll,
 	})
 	if err != nil {
 		a.logf("panel render failed: %v", err)
@@ -277,12 +289,26 @@ func (a *app) repaintPanel() {
 	a.panelPlaced = true
 	a.panelLastH = ch
 	a.panelLayout = p
+	a.panelScroll = p.Scroll
+	a.panelMaxScroll = p.MaxScroll
+	a.panelScrollStep = p.ScrollStep
+	a.panelScrollArea = p.ScrollArea
 	a.panelMu.Unlock()
 
 	ov.SetHitRect(winplat.Rect{X: p.Frame.Pad, Y: p.Frame.Pad, W: cw, H: ch})
 	// Composite the current press highlight (if any) over the fresh base render, so a background
 	// repaint while a control is held does not drop the highlight.
 	ov.Present(render.WithPressHighlight(p.Frame.Img, p.Controls, pressedID, dark), pos[0]-p.Frame.Pad, pos[1]-p.Frame.Pad)
+}
+
+// maxPanelHeight caps the control window to the work area (minus the usual margin), so an expanded
+// utterance scrolls inside the window instead of running off the screen.
+func maxPanelHeight(work winplat.Rect, dpi int) float64 {
+	if work.H <= 0 {
+		return 0
+	}
+	m := pillMargin * float64(dpi) / 96.0
+	return float64(work.H) - 2*m
 }
 
 // presentPanelPress updates only the press highlight: it composites the scrim over the last rendered
@@ -402,6 +428,33 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 	a.panelMu.Unlock()
 
 	switch ev.Kind {
+	case winplat.MouseWheel:
+		a.panelMu.Lock()
+		step := a.panelScrollStep
+		maxScroll := a.panelMaxScroll
+		area := a.panelScrollArea
+		cur := a.panelScroll
+		a.panelMu.Unlock()
+		if step <= 0 || ev.Delta == 0 {
+			return
+		}
+		if ev.X < area.Min.X || ev.X >= area.Max.X || ev.Y < area.Min.Y || ev.Y >= area.Max.Y {
+			return // wheel outside the scrollable list does nothing
+		}
+		n := cur - ev.Delta*step/120
+		if n < 0 {
+			n = 0
+		}
+		if n > maxScroll {
+			n = maxScroll
+		}
+		if n == cur {
+			return
+		}
+		a.panelMu.Lock()
+		a.panelScroll = n
+		a.panelMu.Unlock()
+		a.refreshPanel()
 	case winplat.MouseDown:
 		if c, ok := layout.ControlAt(ev.X, ev.Y); ok {
 			a.panelMu.Lock()
@@ -489,13 +542,17 @@ func (a *app) panelAction(c render.Control) {
 	case c.ID == "tab:dictations":
 		a.panelMu.Lock()
 		a.panelActiveTab = render.TabDictations
+		a.panelScroll = 0
 		a.panelMu.Unlock()
 		a.refreshPanel()
 	case c.ID == "tab:settings":
 		a.panelMu.Lock()
 		a.panelActiveTab = render.TabSettings
+		a.panelScroll = 0
 		a.panelMu.Unlock()
 		a.refreshPanel()
+	case strings.HasPrefix(c.ID, "expand:"):
+		a.toggleHistoryExpanded(strings.TrimPrefix(c.ID, "expand:"))
 	case strings.HasPrefix(c.ID, "copy:"):
 		id := strings.TrimPrefix(c.ID, "copy:")
 		a.copyHistoryItem(id)
@@ -689,6 +746,23 @@ func formatTimeAgo(t time.Time) string {
 	default:
 		return t.Format("Jan 02, 15:04")
 	}
+}
+
+// toggleHistoryExpanded expands or collapses one history card so the whole utterance is readable.
+// The card grows in place; if the list no longer fits the window the render clamps the scroll and
+// the user can wheel through it.
+func (a *app) toggleHistoryExpanded(id string) {
+	a.panelMu.Lock()
+	if a.panelExpanded == nil {
+		a.panelExpanded = make(map[string]bool)
+	}
+	if a.panelExpanded[id] {
+		delete(a.panelExpanded, id)
+	} else {
+		a.panelExpanded[id] = true
+	}
+	a.panelMu.Unlock()
+	a.refreshPanel()
 }
 
 // copyHistoryItem copies the card text to the clipboard and shows feedback.

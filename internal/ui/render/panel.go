@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"math"
 	"strings"
 
@@ -49,6 +50,11 @@ const (
 
 	panelInfoSz = 12.0
 	panelInfoLH = 16.0
+
+	// A collapsed history card shows this many wrapped lines; expanding shows the whole utterance, up
+	// to a sane cap so a pathological transcript cannot exhaust memory.
+	historyPreviewLines = 4
+	historyMaxLines     = 200
 )
 
 // Panel tab identifiers.
@@ -67,6 +73,8 @@ type PanelHistoryItem struct {
 	AsrMs     int64
 	CleanupMs int64
 	ViewMode  string // "clean", "raw", "diff"
+	// Expanded shows the whole utterance instead of the 4-line preview.
+	Expanded bool
 }
 
 // ControlKind identifies an interactive region of the panel.
@@ -81,6 +89,8 @@ const (
 	ControlToggle
 	// ControlButton is a pressable row.
 	ControlButton
+	// ControlCard is a whole history card; clicking it toggles the full-text expansion.
+	ControlCard
 )
 
 // Control is one interactive region, in the panel image's client coordinates (device pixels,
@@ -139,13 +149,23 @@ type PanelModel struct {
 	Dark        bool
 	Preset      string
 	Scale       float64
+	// MaxHeight caps the whole panel's height in device pixels (0 = unbounded). The dictations tab
+	// scrolls when it would otherwise exceed it, so a long expanded utterance stays on screen.
+	MaxHeight float64
+	// Scroll is the scroll offset of the dictations content in device pixels; it is clamped to the
+	// returned MaxScroll.
+	Scroll int
 }
 
 // Panel is a rendered control window plus its interactive regions and draggable header.
 type Panel struct {
-	Frame    Frame
-	Controls []Control
-	Header   image.Rectangle
+	Frame      Frame
+	Controls   []Control
+	Header     image.Rectangle
+	ScrollArea image.Rectangle // the scrollable content viewport, for hit-testing the wheel
+	Scroll     int             // the scroll offset actually used (input clamped to [0, MaxScroll])
+	MaxScroll  int             // the largest valid Scroll for this layout
+	ScrollStep int             // device pixels per wheel notch
 }
 
 // RenderPanel draws the control window. It reuses the pill's drawing primitives and text flow, so
@@ -239,13 +259,37 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	if hasFooter {
 		footerH = 1 + 6*scale + panelInfoLH*scale + 6*scale
 	}
-
-	cardH := headerH + 6*scale + 1 + 8*scale + statusH + 8*scale + tabH + 12*scale + contentH
+	fixedH := headerH + 6*scale + 1 + 8*scale + statusH + 8*scale + tabH + 12*scale
 	if hasFooter {
-		cardH += footerH
+		fixedH += footerH
 	} else {
-		cardH += 6 * scale
+		fixedH += 6 * scale
 	}
+
+	// Cap the dictations content to the room the caller allows (the work area) and scroll it, so a
+	// long expanded utterance stays readable instead of running off the screen. The settings tab is
+	// short and keeps its natural height.
+	visibleH := contentH
+	maxScroll := 0
+	scroll := m.Scroll
+	if m.MaxHeight > 0 && m.ActiveTab == TabDictations && contentH > 0 {
+		avail := m.MaxHeight - fixedH
+		if minH := 96.0 * scale; avail < minH {
+			avail = minH
+		}
+		if contentH > avail {
+			visibleH = avail
+			maxScroll = int(math.Round(contentH - avail))
+		}
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+
+	cardH := fixedH + visibleH
 
 	totalW := int(math.Round(cardW))
 	totalH := int(math.Round(cardH))
@@ -308,15 +352,44 @@ func RenderPanel(m PanelModel) (Panel, error) {
 
 	// Tab content
 	left := cx + pad
+	contentTop := curY
+	scrollArea := image.Rect(0, int(math.Round(contentTop)), totalW, int(math.Round(contentTop+visibleH)))
 	if m.ActiveTab == TabDictations {
-		if len(m.History) == 0 {
-			drawEmptyHistory(img, left, curY, innerW, 76.0*scale, scale, theme, rowFace, smallFace)
-			curY += 76.0 * scale
-		} else {
+		switch {
+		case len(m.History) == 0:
+			drawEmptyHistory(img, left, contentTop, innerW, 76.0*scale, scale, theme, rowFace, smallFace)
+		case maxScroll == 0:
+			y := contentTop
 			for i, item := range m.History {
-				isCopied := m.CopiedID == item.ID
-				controls = append(controls, drawHistoryItem(img, item, left, curY, innerW, histH[i], scale, theme, isCopied, bodyFace, chipFace, smallFace)...)
-				curY += histH[i] + 8.0*scale
+				controls = append(controls, drawHistoryItem(img, item, left, y, innerW, histH[i], scale, theme, m.CopiedID == item.ID, bodyFace, chipFace, smallFace)...)
+				y += histH[i] + 8.0*scale
+			}
+		default:
+			// The list overflows the viewport: draw it into a scratch image and blit the visible
+			// slice, so cards clip cleanly at the top and bottom edges.
+			scratch := image.NewRGBA(image.Rect(0, 0, totalW, int(math.Round(contentH))))
+			var listControls []Control
+			y := 0.0
+			for i, item := range m.History {
+				listControls = append(listControls, drawHistoryItem(scratch, item, left, y, innerW, histH[i], scale, theme, m.CopiedID == item.ID, bodyFace, chipFace, smallFace)...)
+				y += histH[i] + 8.0*scale
+			}
+			draw.Draw(img, scrollArea, scratch, image.Point{Y: scroll}, draw.Over)
+			dy := int(math.Round(contentTop)) - scroll
+			for _, c := range listControls {
+				r := c.Rect.Add(image.Pt(0, dy))
+				if c.Kind == ControlCard {
+					// Keep the whole-card toggle clickable on its visible part, so a long expanded card
+					// can be collapsed without scrolling back to its header.
+					r = r.Intersect(scrollArea)
+				} else if r.Min.Y < scrollArea.Min.Y || r.Max.Y > scrollArea.Max.Y {
+					continue
+				}
+				if r.Empty() {
+					continue
+				}
+				c.Rect = r
+				controls = append(controls, c)
 			}
 		}
 	} else {
@@ -326,6 +399,7 @@ func RenderPanel(m PanelModel) (Panel, error) {
 			curY += rowH[i] + rowGap*scale
 		}
 	}
+	curY = contentTop + visibleH
 
 	if hasFooter {
 		// Footer Separator
@@ -343,7 +417,15 @@ func RenderPanel(m PanelModel) (Panel, error) {
 	// Press feedback is composited by the controller over the cached frame (WithPressHighlight), so
 	// no press scrim is drawn into the base render.
 
-	return Panel{Frame: Frame{Img: img, Pad: 0}, Controls: controls, Header: header}, nil
+	return Panel{
+		Frame:      Frame{Img: img, Pad: 0},
+		Controls:   controls,
+		Header:     header,
+		ScrollArea: scrollArea,
+		Scroll:     scroll,
+		MaxScroll:  maxScroll,
+		ScrollStep: int(math.Round(3 * bodyLine * scale)),
+	}, nil
 }
 
 // WithPressHighlight returns img unchanged when no control is pressed, otherwise a copy with the
@@ -356,6 +438,11 @@ func WithPressHighlight(img *image.RGBA, controls []Control, pressedID string, d
 	for _, c := range controls {
 		if c.ID != pressedID {
 			continue
+		}
+		if c.Kind == ControlCard {
+			// The expand/collapse itself is the feedback; a scrim over a tall card would just be a
+			// large flash.
+			return img
 		}
 		out := image.NewRGBA(img.Bounds())
 		copy(out.Pix, img.Pix)
@@ -430,15 +517,25 @@ func measureHistoryItem(item PanelHistoryItem, maxWidth, scale float64, theme Th
 	topH := 22.0 * scale
 	botH := 16.0 * scale
 	words := historyItemWords(bodyFace, item, theme)
-	lines := wrapWords(bodyFace, words, maxWidth-2*innerPad)
-	if len(lines) > 4 {
-		lines = lines[:4]
-	}
+	lines := clampHistoryLines(wrapWords(bodyFace, words, maxWidth-2*innerPad), item.Expanded)
 	if len(lines) == 0 {
 		lines = [][]word{{}}
 	}
 	lineH := 18.0 * scale
 	return 2*innerPad + topH + 8.0*scale + float64(len(lines))*lineH + 8.0*scale + botH
+}
+
+// clampHistoryLines limits a card's wrapped text to the collapsed preview normally, or the hard cap
+// when the card is expanded.
+func clampHistoryLines(lines [][]word, expanded bool) [][]word {
+	limit := historyPreviewLines
+	if expanded {
+		limit = historyMaxLines
+	}
+	if len(lines) > limit {
+		return lines[:limit]
+	}
+	return lines
 }
 
 // drawHistoryItem draws one elevated card with timestamp, view toggle, copy button, text, and telemetry.
@@ -462,6 +559,12 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 		timeText = "Just now"
 	}
 	drawText(img, smallFace, theme.OnSurfaceVariant, x+innerPad, topY+baseline(smallFace, topH), timeText)
+
+	// Expand affordance: pointing up when the card is expanded, down when collapsed. The whole card is
+	// clickable, so this only advertises the toggle.
+	chevSz := 10.0 * scale
+	timeW := float64(font.MeasureString(smallFace, timeText).Ceil())
+	drawChevron(img, x+innerPad+timeW+8.0*scale+chevSz/2, topY+topH/2, chevSz, theme.OnSurfaceVariant, item.Expanded)
 
 	// Right buttons: Copy and ViewMode
 	btnH := 22.0 * scale
@@ -507,10 +610,7 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 	// Body text with inline diff / strike-through support:
 	bodyTop := topY + topH + 8.0*scale
 	words := historyItemWords(bodyFace, item, theme)
-	lines := wrapWords(bodyFace, words, w-2*innerPad)
-	if len(lines) > 4 {
-		lines = lines[:4]
-	}
+	lines := clampHistoryLines(wrapWords(bodyFace, words, w-2*innerPad), item.Expanded)
 	lineH := 18.0 * scale
 	asc := float64(bodyFace.Metrics().Ascent) / 64
 	spaceW := float64(font.MeasureString(bodyFace, " ").Ceil())
@@ -543,6 +643,12 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 	}
 	ww := float64(font.MeasureString(smallFace, wordsStr).Ceil())
 	drawText(img, smallFace, theme.OnSurfaceVariant, x+w-innerPad-ww, botY+baseline(smallFace, botH), wordsStr)
+
+	// The whole card toggles between the 4-line preview and the full utterance. Appended last so a
+	// click that lands on Copy or the view-mode button (drawn earlier) wins over it.
+	out = append(out, Control{ID: "expand:" + item.ID, Kind: ControlCard, Rect: image.Rect(
+		int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)),
+	), Radius: rad})
 	return out
 }
 

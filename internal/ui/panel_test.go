@@ -177,6 +177,22 @@ func TestPanelHistoryActions(t *testing.T) {
 	}
 }
 
+// TestToggleHistoryExpanded checks the whole-card click toggles a card between preview and full text.
+func TestToggleHistoryExpanded(t *testing.T) {
+	a := &app{}
+	a.history = NewHistoryStore("")
+	it := a.history.Add("Hello world", "hello world", 200, 100)
+
+	a.toggleHistoryExpanded(it.ID)
+	if !a.panelExpanded[it.ID] {
+		t.Fatal("card was not expanded")
+	}
+	a.toggleHistoryExpanded(it.ID)
+	if a.panelExpanded[it.ID] {
+		t.Fatal("card was not collapsed")
+	}
+}
+
 func rowByID(rows []render.Row, id string) (render.Row, bool) {
 	for _, r := range rows {
 		if r.ID == id {

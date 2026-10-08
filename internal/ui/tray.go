@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"image"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,9 +103,14 @@ type app struct {
 	accentDropdownOpen bool
 	panelActiveTab     int
 	panelCopiedID      string
-	panelPressID       string // control where the current press began
-	panelPressedID     string // control currently under the held pointer (drawn highlighted)
-	panelPressing      bool   // a control press is in progress
+	panelPressID       string          // control where the current press began
+	panelPressedID     string          // control currently under the held pointer (drawn highlighted)
+	panelPressing      bool            // a control press is in progress
+	panelExpanded      map[string]bool // history cards expanded to show the full utterance
+	panelScroll        int             // dictations scroll offset in device pixels
+	panelMaxScroll     int             // the largest valid scroll for the last render
+	panelScrollStep    int             // device pixels per wheel notch
+	panelScrollArea    image.Rectangle // the scrollable content viewport
 
 	// Panel footer telemetry, guarded by mu.
 	lastAsrMs     int64

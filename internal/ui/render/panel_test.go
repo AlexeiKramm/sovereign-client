@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -125,6 +126,67 @@ func TestRenderPanelRowsControls(t *testing.T) {
 		if !ok || got.ID != id {
 			t.Fatalf("ControlAt(centre of %q) = %q, %v", id, got.ID, ok)
 		}
+	}
+}
+
+// TestHistoryCardExpand checks expanding a history card reveals more of the utterance: the card must
+// grow taller than the collapsed 4-line preview.
+func TestHistoryCardExpand(t *testing.T) {
+	long := strings.Repeat("word ", 120)
+	base := PanelModel{
+		Title: "Sovereign", Status: "Ready", ActiveTab: TabDictations,
+		History: []PanelHistoryItem{{ID: "a", TimeAgo: "Just now", CleanText: long, Words: 120, ViewMode: "clean"}},
+		Scale:   1,
+	}
+	collapsed, err := RenderPanel(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.History[0].Expanded = true
+	expanded, err := RenderPanel(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ch := collapsed.Frame.Size()
+	_, eh := expanded.Frame.Size()
+	if eh <= ch {
+		t.Fatalf("expanded card is not taller: collapsed=%d expanded=%d", ch, eh)
+	}
+}
+
+// TestHistoryScrollCapsAndClips checks that a MaxHeight cap bounds the panel, exposes a scroll range,
+// keeps the whole-card toggle hittable on its visible part, and moves the bitmap when scrolled.
+func TestHistoryScrollCapsAndClips(t *testing.T) {
+	m := PanelModel{
+		Title: "Sovereign", Status: "Ready", ActiveTab: TabDictations,
+		History:   []PanelHistoryItem{{ID: "a", TimeAgo: "1 min ago", CleanText: strings.Repeat("word ", 400), Words: 400, ViewMode: "clean", Expanded: true}},
+		Scale:     1,
+		MaxHeight: 400,
+	}
+	p, err := RenderPanel(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.MaxScroll <= 0 {
+		t.Fatal("expected a scroll range once the list is capped")
+	}
+	if _, h := p.Frame.Size(); float64(h) > m.MaxHeight {
+		t.Fatalf("panel height %d exceeds the %v cap", h, m.MaxHeight)
+	}
+	c, ok := controlByID(p, "expand:a")
+	if !ok {
+		t.Fatal("missing the whole-card expand control")
+	}
+	if c.Rect.Min.Y < p.ScrollArea.Min.Y || c.Rect.Max.Y > p.ScrollArea.Max.Y {
+		t.Fatalf("card toggle not clipped into the viewport: %v vs %v", c.Rect, p.ScrollArea)
+	}
+	m.Scroll = p.MaxScroll
+	scrolled, err := RenderPanel(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pixelsEqual(p.Frame.Img, scrolled.Frame.Img) {
+		t.Fatal("scrolling did not change the rendered bitmap")
 	}
 }
 

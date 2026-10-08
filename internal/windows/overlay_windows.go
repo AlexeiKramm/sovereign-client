@@ -305,6 +305,20 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		// Return maNoActivate so Windows does not eat the mouse click upon activation from
 		// another window. The panel activates itself on MouseDown so the first click registers.
 		return maNoActivate
+	case wmMouseWheel:
+		if o.interactive && o.onMouse != nil {
+			// WM_MOUSEWHEEL's lParam is in SCREEN coordinates (unlike the move/button messages); the
+			// wheel delta is the signed high word of wParam. Convert before hit-testing.
+			pt := point{X: int32(int16(lparam & 0xffff)), Y: int32(int16((lparam >> 16) & 0xffff))}
+			procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
+			o.onMouse(MouseEvent{
+				X:     int(pt.X),
+				Y:     int(pt.Y),
+				Kind:  MouseWheel,
+				Delta: int(int16((wparam >> 16) & 0xffff)),
+			})
+			return 0
+		}
 	case wmMouseMove, wmLButtonDown, wmLButtonUp:
 		if o.interactive && o.onMouse != nil {
 			kind := mouseKind(uint32(message))
@@ -567,6 +581,7 @@ const (
 	wmMouseMove     = 0x0200
 	wmLButtonDown   = 0x0201
 	wmLButtonUp     = 0x0202
+	wmMouseWheel    = 0x020A
 	wmMouseActivate = 0x0021
 	wmDisplayChange = 0x007E
 	wmNCHitTest     = 0x0084

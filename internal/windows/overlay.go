@@ -16,6 +16,8 @@ const (
 	MouseDown
 	// MouseUp is a left-button release.
 	MouseUp
+	// MouseWheel is a wheel notch; Delta is the wheel delta (positive = away from the user, i.e. up).
+	MouseWheel
 )
 
 // MouseEvent is a pointer event in the panel's client coordinates (physical pixels), measured from
@@ -24,6 +26,8 @@ const (
 type MouseEvent struct {
 	X, Y int
 	Kind MouseKind
+	// Delta is the wheel delta for MouseWheel (multiples of 120), zero otherwise.
+	Delta int
 }
 
 // PanelOptions configures the interactive control window (Chunk 4d). Unlike the pill it is
