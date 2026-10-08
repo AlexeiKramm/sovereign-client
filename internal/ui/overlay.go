@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/alexeikramm/sovereign-client/internal/core"
 	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 	"github.com/alexeikramm/sovereign-client/internal/ui/render"
 	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
@@ -304,13 +305,14 @@ func (a *app) watchEsc() {
 func (a *app) cancelDictation() {
 	a.mu.Lock()
 	c := a.client
+	ready := a.connState == core.StateReady
 	pending := a.pending
 	if pending {
 		a.pending = false
 		a.pendingTest = false
 	}
 	a.mu.Unlock()
-	if pending && c == nil {
+	if pending && !ready {
 		a.hidePill()
 		return
 	}

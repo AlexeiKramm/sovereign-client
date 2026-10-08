@@ -215,7 +215,8 @@ func (a *app) quit() {
 	systray.Quit()
 }
 
-// setState updates the icon, tooltip and status row. It is safe to call from any goroutine.
+// setState updates the icon, tooltip and status, then arms or disarms the hotkey for the new state.
+// It is safe to call from any goroutine.
 func (a *app) setState(s TrayState, detail string) {
 	// Any state other than StateBusy means the phone is no longer marked taken.
 	if s != StateBusy {
@@ -224,6 +225,21 @@ func (a *app) setState(s TrayState, detail string) {
 		a.mu.Unlock()
 	}
 
+	a.applyTrayState(s, detail)
+
+	// Hotkeys are live while there is a link to dictate over. A taken phone is still a live link —
+	// the phone refuses the session, it does not break the connection — so the hotkey stays armed;
+	// disarming it here would wedge dictation until a reconnect.
+	if hotkeysLive(s) {
+		a.armHotkey()
+	} else {
+		a.disarmHotkey()
+	}
+}
+
+// applyTrayState updates the icon, tooltip, status row and panel WITHOUT touching the hotkey, so a
+// hotkey-registration failure can report itself without re-entering armHotkey through setState.
+func (a *app) applyTrayState(s TrayState, detail string) {
 	if s == StateReady && detail == "" {
 		detail = a.serverName()
 	}
@@ -242,15 +258,6 @@ func (a *app) setState(s TrayState, detail string) {
 		} else {
 			a.mTest.Disable()
 		}
-	}
-
-	// Hotkeys are live while there is a link to dictate over. A taken phone is still a live link —
-	// the phone refuses the session, it does not break the connection — so the hotkey stays armed;
-	// disarming it here would wedge dictation until a reconnect.
-	if hotkeysLive(s) {
-		a.armHotkey()
-	} else {
-		a.disarmHotkey()
 	}
 }
 
@@ -283,7 +290,12 @@ func (a *app) connect() {
 		a.client = nil
 		a.connCancel = nil
 		a.attemptCancel = nil
+		retry := a.pending || a.resolveFull
 		a.mu.Unlock()
+		if retry {
+			// A hotkey arrived while the manager was shutting down; run the ladder again for it.
+			go a.connect()
+		}
 	}()
 
 	for cctx.Err() == nil {
@@ -455,15 +467,14 @@ func (a *app) setLastAddr(addr string) {
 func (a *app) beginOnDemandDictation() {
 	a.mu.Lock()
 	a.pending = true
-	connecting := a.connecting
 	a.mu.Unlock()
 
 	a.showConnectingPill("Connecting…") // respond before any discovery happens
 
 	a.requestFullResolve()
-	if !connecting {
-		go a.connect()
-	}
+	// Always attempt to start the manager: connect() dedupes with a.connecting, and its teardown
+	// re-spawns if the pending intent arrived mid-shutdown (closing that race).
+	go a.connect()
 }
 
 // startPendingDictation runs the dictation a hotkey (or the 5 s test) deferred until the link came
@@ -788,7 +799,7 @@ func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string, reset <-chan str
 					a.startDictation()
 				}
 			case iface.Release:
-				if a.isDictating() {
+				if a.isDictating() || a.isPending() {
 					a.stopDictation()
 				}
 			}
@@ -904,15 +915,17 @@ func (a *app) startDictation() {
 func (a *app) stopDictation() {
 	a.mu.Lock()
 	c := a.client
+	ready := a.connState == core.StateReady
 	pending := a.pending
 	if pending {
 		a.pending = false
 		a.pendingTest = false
 	}
 	a.mu.Unlock()
-	if pending && c == nil {
-		// Released before the link came up: abandon the deferred dictation rather than start one
-		// the user is no longer holding.
+	if pending && !ready {
+		// Released before the link came up: abandon the deferred dictation rather than start one the
+		// user is no longer holding. The pill must come down even though a client object already
+		// exists (it is created before the handshake completes), hence the state check, not c==nil.
 		a.hidePill()
 		return
 	}
@@ -922,6 +935,13 @@ func (a *app) stopDictation() {
 	if err := c.StopDictation(a.ctx); err != nil {
 		a.logf("dictation stop failed: %v", err)
 	}
+}
+
+// isPending reports whether a hotkey dictation is waiting for a link.
+func (a *app) isPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pending
 }
 
 // inject writes the finished block with the configured method, falling back to the other method so
@@ -975,18 +995,22 @@ func (a *app) armHotkey() {
 		a.mu.Unlock()
 		return
 	}
-	chord, err := iface.ParseHotkey(a.settings.Hotkey)
+	spec := a.settings.Hotkey
+	chord, err := iface.ParseHotkey(spec)
 	mode := a.settings.Mode
 	a.mu.Unlock()
 	if err != nil {
-		a.logf("hotkey %q is invalid: %v", a.settings.Hotkey, err)
+		a.logf("hotkey %q is invalid: %v", spec, err)
 		return
 	}
 
 	w, err := winplat.StartHotkey(chord, mode == ModeToggle)
 	if err != nil {
 		a.logf("hotkey unavailable: %v", err)
-		a.setState(StateError, "hotkey unavailable")
+		// Report the failure without re-entering armHotkey through setState: hotkeysLive is always
+		// true, so setState would call armHotkey again while still unarmed and recurse until the
+		// stack overflows.
+		a.applyTrayState(StateError, "hotkey unavailable")
 		return
 	}
 	reset := make(chan struct{}, 1)

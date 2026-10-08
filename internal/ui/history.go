@@ -172,11 +172,13 @@ func (h *HistoryStore) Load() error {
 	if err != nil {
 		return err
 	}
+	legacy := false
 	data, err := h.cipher.open(blob)
 	if err != nil {
 		if !looksLikeJSON(blob) {
 			return err
 		}
+		legacy = true
 		data = blob
 	}
 	var loaded []HistoryItem
@@ -189,6 +191,10 @@ func (h *HistoryStore) Load() error {
 		loaded = loaded[:HistoryMaxItems]
 	}
 	h.items = loaded
+	if legacy {
+		// Re-seal the pre-encryption file at once so the plaintext does not linger on disk.
+		h.saveLocked()
+	}
 	return nil
 }
 

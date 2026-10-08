@@ -111,6 +111,27 @@ func TestHistoryStoreImportsLegacyPlaintext(t *testing.T) {
 	}
 }
 
+// TestHistoryStoreReSealsLegacyPlaintext pins that importing a legacy plaintext file also rewrites
+// it encrypted, so the cleartext does not linger on disk.
+func TestHistoryStoreReSealsLegacyPlaintext(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "history.json")
+	const marker = "LEGACY-PLAINTEXT-PHRASE"
+	if err := os.WriteFile(tmp, []byte(`[{"id":"1","clean_text":"`+marker+`","view_mode":"clean"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hs := newHistoryStore(tmp, fakeCipher{})
+	if len(hs.Items()) != 1 {
+		t.Fatalf("legacy history not imported: %+v", hs.Items())
+	}
+	blob, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(blob, []byte(marker)) {
+		t.Fatal("legacy plaintext was not re-sealed on load")
+	}
+}
+
 // TestHistoryStoreDPAPIAtRest proves the production cipher seals transcripts on Windows.
 func TestHistoryStoreDPAPIAtRest(t *testing.T) {
 	if runtime.GOOS != "windows" {
