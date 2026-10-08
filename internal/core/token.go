@@ -22,6 +22,15 @@ type Credentials struct {
 // Complete reports whether c is a usable pairing (pin + token present).
 func (c Credentials) Complete() bool { return c.ServerSpki != "" && c.Token != "" }
 
+// ProtectAtRest seals a blob with the per-user OS secret store (Windows DPAPI). The credential file
+// and the local dictation history both use it, so neither a token nor a transcript is written to
+// disk in the clear. On a platform without an implemented store it returns an error rather than
+// writing in the clear.
+func ProtectAtRest(plain []byte) ([]byte, error) { return protect(plain) }
+
+// UnprotectAtRest reverses ProtectAtRest.
+func UnprotectAtRest(blob []byte) ([]byte, error) { return unprotect(blob) }
+
 // CredentialStore persists Credentials in one OS-protected file.
 type CredentialStore struct{ Path string }
 

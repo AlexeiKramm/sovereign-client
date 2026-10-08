@@ -204,6 +204,7 @@ func (a *app) panelRows() []render.Row {
 		On:      accentOpen,
 	})
 	rows = append(rows, render.Row{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup})
+	rows = append(rows, render.Row{Kind: render.RowToggle, ID: "debug", Text: "Log transcripts (debug)", On: s.Debug})
 	if paired {
 		rows = append(rows, render.Row{Kind: render.RowButton, ID: "unpair", Text: "Unpair…", Detail: server})
 	} else {
@@ -471,6 +472,8 @@ func (a *app) panelAction(c render.Control) {
 		a.setThemePreset(strings.TrimPrefix(c.ID, "preset:"))
 	case c.ID == "startup":
 		a.toggleStartup()
+	case c.ID == "debug":
+		a.toggleDebug()
 	case c.ID == "hotkey:set":
 		a.startPanelHotkeyCapture()
 	case c.ID == "pair":

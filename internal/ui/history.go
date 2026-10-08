@@ -2,11 +2,15 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/alexeikramm/sovereign-client/internal/core"
 )
 
 // HistoryMaxItems is the maximum number of items retained in local history (last 5).
@@ -31,16 +35,36 @@ type HistoryItem struct {
 	ViewMode  string    `json:"view_mode"` // "clean", "raw", or "diff"
 }
 
-// HistoryStore manages recent dictations with thread-safety and optional JSON persistence.
-type HistoryStore struct {
-	mu    sync.Mutex
-	items []HistoryItem
-	path  string
+// historyCipher seals and opens the persisted history. Production uses the per-user OS secret store
+// (DPAPI on Windows); tests inject a reversible fake so the store logic runs on any OS.
+type historyCipher interface {
+	seal(plain []byte) ([]byte, error)
+	open(blob []byte) ([]byte, error)
 }
 
-// NewHistoryStore creates an empty history store.
+// osHistoryCipher is the production cipher: the same per-user OS secret store the credential file
+// uses, so transcripts are never written to disk in the clear.
+type osHistoryCipher struct{}
+
+func (osHistoryCipher) seal(plain []byte) ([]byte, error) { return core.ProtectAtRest(plain) }
+func (osHistoryCipher) open(blob []byte) ([]byte, error)  { return core.UnprotectAtRest(blob) }
+
+// HistoryStore manages recent dictations with thread-safety and OS-encrypted persistence.
+type HistoryStore struct {
+	mu     sync.Mutex
+	items  []HistoryItem
+	path   string
+	cipher historyCipher
+}
+
+// NewHistoryStore creates an empty history store encrypted with the OS secret store.
 func NewHistoryStore(path string) *HistoryStore {
-	hs := &HistoryStore{path: path}
+	return newHistoryStore(path, osHistoryCipher{})
+}
+
+// newHistoryStore is the seam tests use to supply a reversible cipher.
+func newHistoryStore(path string, cipher historyCipher) *HistoryStore {
+	hs := &HistoryStore{path: path, cipher: cipher}
 	if path != "" {
 		_ = hs.Load()
 	}
@@ -111,31 +135,49 @@ func (h *HistoryStore) Clear() {
 }
 
 func (h *HistoryStore) saveLocked() {
-	if h.path == "" {
+	if h.path == "" || h.cipher == nil {
 		return
 	}
 	dir := filepath.Dir(h.path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
 	}
-	data, err := json.MarshalIndent(h.items, "", "  ")
+	data, err := json.Marshal(h.items)
 	if err != nil {
 		return
 	}
+	blob, err := h.cipher.seal(data)
+	if err != nil {
+		// Refuse to fall back to plaintext: without an OS secret store the history is not persisted
+		// (the in-memory list still works for this run).
+		return
+	}
 	tmp := h.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err == nil {
+	if err := os.WriteFile(tmp, blob, 0600); err == nil {
 		_ = os.Rename(tmp, h.path)
 	}
 }
 
-// Load reads persisted history from disk.
+// Load reads and decrypts persisted history from disk. A missing file is not an error. A legacy
+// plaintext file (pre-encryption) is imported so no transcript is lost, and is re-sealed on the
+// next save.
 func (h *HistoryStore) Load() error {
-	if h.path == "" {
+	if h.path == "" || h.cipher == nil {
 		return nil
 	}
-	data, err := os.ReadFile(h.path)
+	blob, err := os.ReadFile(h.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
+	}
+	data, err := h.cipher.open(blob)
+	if err != nil {
+		if !looksLikeJSON(blob) {
+			return err
+		}
+		data = blob
 	}
 	var loaded []HistoryItem
 	if err := json.Unmarshal(data, &loaded); err != nil {
@@ -148,6 +190,22 @@ func (h *HistoryStore) Load() error {
 	}
 	h.items = loaded
 	return nil
+}
+
+// looksLikeJSON reports whether b starts (after whitespace) with a JSON container, identifying a
+// legacy plaintext history file from before it was encrypted.
+func looksLikeJSON(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '[', '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func countWords(s string) int {

@@ -94,3 +94,36 @@ func TestWaitRetryStopsOnCancel(t *testing.T) {
 		t.Fatal("waitRetry returned true after cancellation")
 	}
 }
+
+// TestEnvTruthy pins the affirmative values the SOVEREIGN_DEBUG override accepts.
+func TestEnvTruthy(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "Yes", " on "} {
+		if !envTruthy(v) {
+			t.Errorf("envTruthy(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "off", "2"} {
+		if envTruthy(v) {
+			t.Errorf("envTruthy(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestDebugLogsFromSettingOrEnv pins that transcript logging is off by default and enabled by either
+// the persisted setting or the SOVEREIGN_DEBUG override.
+func TestDebugLogsFromSettingOrEnv(t *testing.T) {
+	a := &app{}
+	t.Setenv("SOVEREIGN_DEBUG", "")
+	if a.debugLogs() {
+		t.Fatal("debug logging is on by default")
+	}
+	a.settings.Debug = true
+	if !a.debugLogs() {
+		t.Fatal("Debug setting was not honored")
+	}
+	a.settings.Debug = false
+	t.Setenv("SOVEREIGN_DEBUG", "1")
+	if !a.debugLogs() {
+		t.Fatal("SOVEREIGN_DEBUG override was not honored")
+	}
+}

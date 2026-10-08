@@ -565,12 +565,13 @@ func (a *app) handlers() core.Handlers {
 			a.setPhoneState(s)
 		},
 		OnCommitted: func(sessionID, text string, perf core.CommitPerf) {
-			a.logf("commit: %q (asr=%dms cleanup=%dms)", text, perf.AsrMs, perf.CleanupMs)
+			a.logf("commit: %d chars (asr=%dms cleanup=%dms)", len(text), perf.AsrMs, perf.CleanupMs)
+			a.debugf("commit text: %q", text)
 			a.setLiveCommitted(text)
 			a.recordCommitted(perf)
 		},
 		OnProvisional: func(sessionID, text string) {
-			a.logf("live: %q", text)
+			a.debugf("live: %q", text)
 			a.setLiveProvisional(text)
 		},
 		// UTTERANCE_DONE is the only injection trigger (PROTOCOL.md §6), and only FINAL carries
@@ -579,7 +580,8 @@ func (a *app) handlers() core.Handlers {
 			a.setDictating(false)
 			a.setState(StateReady, "")
 			a.signalSmartReset()
-			a.logf("utterance done (%s): %q", reason, delivery)
+			a.logf("utterance done (%s): %d chars", reason, len(delivery))
+			a.debugf("utterance done (%s): %q", reason, delivery)
 			if reason == core.DoneFinal && delivery != "" {
 				a.mu.Lock()
 				asr, cleanup := a.lastAsrMs, a.lastCleanupMs
@@ -1209,6 +1211,23 @@ func (a *app) toggleStartup() {
 	a.refreshPanel()
 }
 
+// toggleDebug flips transcript logging (the panel's "Log transcripts" toggle). Regular mode logs
+// only metadata, never dictated text.
+func (a *app) toggleDebug() {
+	a.mu.Lock()
+	a.settings.Debug = !a.settings.Debug
+	on := a.settings.Debug
+	s := a.settings
+	a.mu.Unlock()
+	a.persist(s)
+	if on {
+		a.logf("transcript logging enabled (debug)")
+	} else {
+		a.logf("transcript logging disabled")
+	}
+	a.refreshPanel()
+}
+
 func (a *app) startupEnabled() bool {
 	return a.exePath != "" && winplat.AutostartEnabled(a.exePath)
 }
@@ -1267,4 +1286,30 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// debugLogs reports whether transcript-bearing log lines are allowed: the persisted setting, or a
+// truthy SOVEREIGN_DEBUG so the coding agent can force verbose logs for a headless run without
+// changing the user's saved settings.
+func (a *app) debugLogs() bool {
+	a.mu.Lock()
+	on := a.settings.Debug
+	a.mu.Unlock()
+	return on || envTruthy(os.Getenv("SOVEREIGN_DEBUG"))
+}
+
+// debugf logs only when transcript logging is enabled; regular mode never writes dictated text.
+func (a *app) debugf(format string, args ...any) {
+	if a.debugLogs() {
+		a.logf(format, args...)
+	}
+}
+
+// envTruthy reports whether an environment variable is set to a conventional affirmative value.
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

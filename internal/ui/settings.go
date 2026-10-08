@@ -66,6 +66,9 @@ type Settings struct {
 	ThemeMode           string `json:"themeMode"`
 	ThemePreset         string `json:"themePreset"`
 	FeedbackDurationSec int    `json:"feedbackDurationSec"`
+	// Debug allows transcript-bearing log lines (committed/live/delivery text) in the tray log. Off
+	// by default: regular logs carry only metadata. A truthy SOVEREIGN_DEBUG forces it on.
+	Debug bool `json:"debug,omitempty"`
 	// LastAddr is runtime state, not user configuration: the host:port of the last successful
 	// connection, tried first by the on-demand discovery ladder so a reconnect skips mDNS and the
 	// sweep. Empty until the first connect. It is stored here because it is non-secret and already

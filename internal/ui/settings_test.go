@@ -55,6 +55,22 @@ func TestSettingsPersistsLastAddress(t *testing.T) {
 	}
 }
 
+func TestSettingsPersistsDebugFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := DefaultSettings()
+	s.Debug = true
+	if err := SaveSettings(path, s); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	got, err := LoadSettings(path)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if !got.Debug {
+		t.Fatal("Debug flag was not persisted")
+	}
+}
+
 func TestSettingsKeepsCustomHotkey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := SaveSettings(path, Settings{Hotkey: "Ctrl+Alt+J"}); err != nil {
