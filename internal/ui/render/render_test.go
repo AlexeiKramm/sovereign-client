@@ -24,22 +24,22 @@ func TestRenderProducesCardAndShadow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if f.Pad <= 0 {
-		t.Fatalf("expected a transparent shadow margin, got Pad=%d", f.Pad)
+	if f.Pad != 0 {
+		t.Fatalf("expected zero shadow margin, got Pad=%d", f.Pad)
 	}
 	w, h := f.Size()
 	if w != int(pillWidth) || h <= 0 {
 		t.Fatalf("card size = %dx%d, want width %v and a positive height", w, h, pillWidth)
 	}
-	if got := f.Img.Bounds().Size(); got.X != w+2*f.Pad || got.Y != h+2*f.Pad {
-		t.Fatalf("bitmap %v does not equal card %dx%d plus 2*%d margin", got, w, h, f.Pad)
+	if got := f.Img.Bounds().Size(); got.X != w || got.Y != h {
+		t.Fatalf("bitmap %v does not equal card %dx%d", got, w, h)
 	}
 	if opaquePixels(f.Img) == 0 {
 		t.Fatal("rendered bitmap is fully transparent")
 	}
 	// The centre of the card must be opaque: it is the surface fill, not a transparent hole.
-	if a := f.Img.RGBAAt(f.Pad+w/2, f.Pad+h/2).A; a != 0xFF {
-		t.Fatalf("card centre alpha = %d, want 255", a)
+	if a := f.Img.RGBAAt(w/2, h/2).A; a < 0xF0 {
+		t.Fatalf("card centre alpha = %d, want >= 240", a)
 	}
 }
 

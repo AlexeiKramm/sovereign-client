@@ -19,10 +19,13 @@ func TestLoadSettingsMissingFileYieldsDefaults(t *testing.T) {
 func TestSettingsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	want := Settings{
-		Mode:            ModeToggle,
-		Hotkey:          "F9",
-		Insertion:       InsertType,
-		OverlayPosition: PosTopLeft,
+		Mode:                ModeToggle,
+		Hotkey:              "F9",
+		Insertion:           InsertType,
+		OverlayPosition:     PosTopLeft,
+		ThemeMode:           ThemeDark,
+		ThemePreset:         "amber",
+		FeedbackDurationSec: 3,
 	}
 	if err := SaveSettings(path, want); err != nil {
 		t.Fatalf("SaveSettings: %v", err)
@@ -33,6 +36,22 @@ func TestSettingsRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("round trip: got %+v, want %+v", got, want)
+	}
+}
+
+func TestSettingsPersistsLastAddress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := DefaultSettings()
+	s.LastAddr = "192.168.1.42:8765"
+	if err := SaveSettings(path, s); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	got, err := LoadSettings(path)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if got.LastAddr != s.LastAddr {
+		t.Fatalf("LastAddr = %q, want %q", got.LastAddr, s.LastAddr)
 	}
 }
 
@@ -77,7 +96,7 @@ func TestLoadSettingsNormalizesUnknownValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettings: %v", err)
 	}
-	want := Settings{Mode: ModeAuto, Hotkey: DefaultHotkey, Insertion: InsertPaste, OverlayPosition: PosBottomRight}
+	want := DefaultSettings()
 	if got != want {
 		t.Fatalf("normalize: got %+v, want %+v", got, want)
 	}

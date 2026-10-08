@@ -46,3 +46,6 @@ func WorkArea(hwnd uintptr) (Rect, int) { return Rect{}, 96 }
 
 // EnablePerMonitorDPI is a no-op off Windows.
 func EnablePerMonitorDPI() error { return nil }
+
+// IsSystemDarkTheme returns true off Windows.
+func IsSystemDarkTheme() bool { return true }

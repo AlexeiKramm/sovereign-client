@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
 // TestStructLayouts pins the Win32 struct sizes the code relies on. SendInput reads a contiguous

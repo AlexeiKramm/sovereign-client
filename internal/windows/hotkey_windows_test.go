@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
 // TestHotkeyRoundTripViaInjectedInput proves the whole hotkey path — WH_KEYBOARD_LL install,

@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
 // TestAnchorPos pins the four overlay anchors against a known work area, including the DPI-scaled
@@ -38,5 +38,38 @@ func TestAnchorPosScalesMargin(t *testing.T) {
 	x192, _ := anchorPos(work, 420, 120, PosTopLeft, 192)
 	if x192 <= x96 {
 		t.Fatalf("margin did not grow with DPI: 96dpi x=%d, 192dpi x=%d", x96, x192)
+	}
+}
+
+// TestHideListeningPillPreservesFeedbackCapsule tests that normal idle/stopped state transitions
+// do not prematurely dismiss the "Inserted X words" feedback capsule.
+func TestHideListeningPillPreservesFeedbackCapsule(t *testing.T) {
+	a := &app{}
+
+	// Listening state: hideListeningPill should hide it
+	a.pill = pillView{status: "Listening…", shown: true}
+	a.hideListeningPill()
+	if a.pill.shown {
+		t.Fatalf("expected listening pill to be hidden")
+	}
+
+	// Inserted feedback state: hideListeningPill must NOT hide it
+	a.pill = pillView{insertedWords: 12, shown: true}
+	a.hideListeningPill()
+	if !a.pill.shown || a.pill.insertedWords != 12 {
+		t.Fatalf("expected inserted feedback pill to stay visible, shown=%v words=%d", a.pill.shown, a.pill.insertedWords)
+	}
+
+	// Error state: hideListeningPill must NOT hide it
+	a.pill = pillView{status: "Phone offline", shown: true, err: true}
+	a.hideListeningPill()
+	if !a.pill.shown || !a.pill.err {
+		t.Fatalf("expected error pill to stay visible, shown=%v err=%v", a.pill.shown, a.pill.err)
+	}
+
+	// Explicit hidePill: should hide regardless
+	a.hidePill()
+	if a.pill.shown {
+		t.Fatalf("expected hidePill to dismiss the pill")
 	}
 }

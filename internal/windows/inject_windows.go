@@ -9,7 +9,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
 var (

@@ -206,3 +206,25 @@ func waitString(t *testing.T, ch <-chan string) string {
 		return ""
 	}
 }
+
+func TestWebSocketURL(t *testing.T) {
+	cases := []struct {
+		addr string
+		path string
+		want string
+	}{
+		{"192.168.1.10:8765", "/sovereign", "wss://192.168.1.10:8765/sovereign"},
+		{"[::1]:8765", "/sovereign", "wss://[::1]:8765/sovereign"},
+		{"[fe80::1%eth0]:8765", "/sovereign", "wss://[fe80::1%25eth0]:8765/sovereign"},
+		{"[fe80::8c4d:fdff:fe3f:77c%Ethernet 4]:8765", "/sovereign", "wss://[fe80::8c4d:fdff:fe3f:77c%25Ethernet+4]:8765/sovereign"},
+	}
+	for _, c := range cases {
+		got := WebSocketURL(c.addr, c.path)
+		if got != c.want {
+			t.Errorf("WebSocketURL(%q, %q) = %q, want %q", c.addr, c.path, got, c.want)
+		}
+		if _, err := url.Parse(got); err != nil {
+			t.Errorf("url.Parse(%q) failed: %v", got, err)
+		}
+	}
+}

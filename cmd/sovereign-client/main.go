@@ -1,4 +1,4 @@
-// Command sovereign-desktop is the Windows tray client for the Sovereign phone server.
+// Command sovereign-client is the Windows tray client for the Sovereign phone server.
 //
 // With no flags it runs the tray app: single instance, connect/reconnect to the phone, tray state,
 // the settings shell, global hotkeys with text injection, and the floating pill overlay. The flags
@@ -16,14 +16,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
-	"github.com/alexeikramm/sovereign-desktop/internal/ui"
-	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
+	"github.com/alexeikramm/sovereign-client/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/ui"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "sovereign-desktop: "+err.Error())
+		fmt.Fprintln(os.Stderr, "sovereign-client: "+err.Error())
 		os.Exit(1)
 	}
 }
@@ -97,14 +97,14 @@ func run() error {
 	}
 
 	if *tray || flag.NFlag() == 0 {
-		return runTray(ident, store, *addr, *pin, *timeout)
+		return runTray(ident, store, *addr, *pin)
 	}
 
 	return runClient(*addr, *pin, *token, *once, *seconds, *timeout, *verbose, ident, store, logf)
 }
 
 // runTray starts the tray application, refusing to run a second instance in the same session.
-func runTray(ident core.Identity, store core.CredentialStore, addr, pin string, timeout time.Duration) error {
+func runTray(ident core.Identity, store core.CredentialStore, addr, pin string) error {
 	// Claim the single-instance mutex before touching the log: a second launch must not truncate
 	// the running instance's log.
 	already, release, err := winplat.AcquireSingleInstance(winplat.SingleInstanceMutexName)
@@ -113,7 +113,7 @@ func runTray(ident core.Identity, store core.CredentialStore, addr, pin string, 
 	}
 	defer release()
 	if already {
-		return errors.New("sovereign-desktop is already running; use its tray icon")
+		return errors.New("sovereign-client is already running; use its tray icon")
 	}
 
 	logger, closeLog, err := ui.OpenLog()
@@ -133,13 +133,12 @@ func runTray(ident core.Identity, store core.CredentialStore, addr, pin string, 
 		logger.Printf("per-monitor DPI unavailable: %v", err)
 	}
 	ui.Run(ui.Options{
-		Identity:        ident,
-		Store:           store,
-		SettingsPath:    filepath.Join(dir, "settings.json"),
-		Addr:            addr,
-		Pin:             pin,
-		DiscoverTimeout: timeout,
-		Logf:            logger.Printf,
+		Identity:     ident,
+		Store:        store,
+		SettingsPath: filepath.Join(dir, "settings.json"),
+		Addr:         addr,
+		Pin:          pin,
+		Logf:         logger.Printf,
 	})
 	return nil
 }
@@ -195,7 +194,7 @@ func runClient(addr, pin, token string, once bool, seconds float64, timeout time
 	}
 	if creds.ServerSpki == "" {
 		if target != "" {
-			return fmt.Errorf("phone at %s is not pinned yet; run: sovereign-desktop -pair -addr %s", target, target)
+			return fmt.Errorf("phone at %s is not pinned yet; run: sovereign-client -pair -addr %s", target, target)
 		}
 		return errors.New("no pin available: pass -pin, run -pair first, or use -discover")
 	}

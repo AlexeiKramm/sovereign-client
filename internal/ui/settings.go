@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
 // Dictation trigger modes.
@@ -38,28 +38,51 @@ const (
 // DefaultHotkey is the hotkey bound until the user picks another.
 const DefaultHotkey = "Ctrl+Alt+Space"
 
+// Theme modes for light/dark appearance.
+const (
+	ThemeSystem = "system"
+	ThemeDark   = "dark"
+	ThemeLight  = "light"
+)
+
+// DefaultThemePreset is the default accent color preset (Sovereign Cyan).
+const DefaultThemePreset = "cyan"
+
 var (
 	dictationModes   = []string{ModeAuto, ModeHold, ModeToggle}
 	insertions       = []string{InsertPaste, InsertType}
 	overlayPositions = []string{PosBottomRight, PosBottomLeft, PosTopRight, PosTopLeft}
+	themeModes       = []string{ThemeSystem, ThemeDark, ThemeLight}
+	themePresets     = []string{"cyan", "sky", "slate", "teal", "amber", "orange", "blue", "green", "coral", "lilac", "mint"}
 )
 
 // Settings is the tray app's user configuration, persisted as JSON beside the identity and
 // credentials. It holds no secret, so unlike Credentials it is written in the clear.
 type Settings struct {
-	Mode            string `json:"mode"`
-	Hotkey          string `json:"hotkey"`
-	Insertion       string `json:"insertion"`
-	OverlayPosition string `json:"overlayPosition"`
+	Mode                string `json:"mode"`
+	Hotkey              string `json:"hotkey"`
+	Insertion           string `json:"insertion"`
+	OverlayPosition     string `json:"overlayPosition"`
+	ThemeMode           string `json:"themeMode"`
+	ThemePreset         string `json:"themePreset"`
+	FeedbackDurationSec int    `json:"feedbackDurationSec"`
+	// LastAddr is runtime state, not user configuration: the host:port of the last successful
+	// connection, tried first by the on-demand discovery ladder so a reconnect skips mDNS and the
+	// sweep. Empty until the first connect. It is stored here because it is non-secret and already
+	// travels with the same atomic-ish save as the rest of the settings.
+	LastAddr string `json:"lastAddr,omitempty"`
 }
 
 // DefaultSettings is the configuration used before the user changes anything.
 func DefaultSettings() Settings {
 	return Settings{
-		Mode:            ModeAuto,
-		Hotkey:          DefaultHotkey,
-		Insertion:       InsertPaste,
-		OverlayPosition: PosBottomRight,
+		Mode:                ModeAuto,
+		Hotkey:              DefaultHotkey,
+		Insertion:           InsertPaste,
+		OverlayPosition:     PosBottomRight,
+		ThemeMode:           ThemeSystem,
+		ThemePreset:         DefaultThemePreset,
+		FeedbackDurationSec: 2,
 	}
 }
 
@@ -75,6 +98,17 @@ func (s *Settings) Normalize() {
 	}
 	if !contains(overlayPositions, s.OverlayPosition) {
 		s.OverlayPosition = PosBottomRight
+	}
+	if !contains(themeModes, s.ThemeMode) {
+		s.ThemeMode = ThemeSystem
+	}
+	if !contains(themePresets, s.ThemePreset) {
+		s.ThemePreset = DefaultThemePreset
+	}
+	if s.FeedbackDurationSec == 0 {
+		s.FeedbackDurationSec = 2
+	} else if s.FeedbackDurationSec < -1 || s.FeedbackDurationSec > 5 {
+		s.FeedbackDurationSec = 2
 	}
 	if _, err := iface.ParseHotkey(s.Hotkey); err != nil {
 		s.Hotkey = DefaultHotkey

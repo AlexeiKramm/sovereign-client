@@ -155,6 +155,20 @@ func peerFromEntry(e *mdns.ServiceEntry) (Peer, error) {
 	}
 	host := strings.TrimSuffix(e.Host, ".")
 	dialHost := ip
+	if dialHost == "" || strings.HasPrefix(dialHost, "fe80:") {
+		// Prefer IPv4 if host resolves to an IPv4 address on the LAN
+		if host != "" {
+			if ips, err := net.LookupIP(host); err == nil {
+				for _, ipCandidate := range ips {
+					if ip4 := ipCandidate.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() {
+						dialHost = ip4.String()
+						ip = dialHost
+						break
+					}
+				}
+			}
+		}
+	}
 	if dialHost == "" {
 		dialHost = host
 	}

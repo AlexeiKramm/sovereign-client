@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"context"
 	"testing"
+	"time"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/core"
 )
 
 func TestMapConnState(t *testing.T) {
@@ -32,19 +34,13 @@ func TestStatusTitle(t *testing.T) {
 	}
 }
 
-// TestHotkeysLiveWhilePhoneBusy pins the fix for a wedge found on the device: a refused dictation
-// used to move the tray to StateError, which disarmed the hotkey, and nothing re-armed it until a
-// reconnect — so the hotkey appeared dead after the phone freed. A taken phone is a refusal, not a
-// transport failure, so the hotkey must stay armed.
-func TestHotkeysLiveWhilePhoneBusy(t *testing.T) {
-	for _, s := range []TrayState{StateReady, StateDictating, StateBusy} {
+// TestHotkeysLive pins that the hotkey stays armed across all states so pressing the hotkey
+// delivers immediate visual feedback on the pill (such as phone busy, phone offline, etc.) rather
+// than dead input.
+func TestHotkeysLive(t *testing.T) {
+	for _, s := range []TrayState{StateReady, StateDictating, StateBusy, StateOffline, StateConnecting, StateError} {
 		if !hotkeysLive(s) {
-			t.Errorf("hotkeysLive(%v) = false, want true (the hotkey must stay armed)", s)
-		}
-	}
-	for _, s := range []TrayState{StateOffline, StateConnecting, StateError} {
-		if hotkeysLive(s) {
-			t.Errorf("hotkeysLive(%v) = true, want false (no link to dictate over)", s)
+			t.Errorf("hotkeysLive(%v) = false, want true (the hotkey must stay armed for user feedback)", s)
 		}
 	}
 }
@@ -56,5 +52,45 @@ func TestBusyStateLabel(t *testing.T) {
 	}
 	if got := statusTitle(StateBusy, busyClause(core.ServerStatePayload{State: core.ServerStateReserved})); got != "Phone busy — the phone's pill is dictating" {
 		t.Errorf("busy tray title = %q", got)
+	}
+}
+
+// TestRequestFullResolveSetsAndKicks pins that a hotkey asks the connect manager for the full
+// discovery ladder and wakes a waiting loop, without touching the network.
+func TestRequestFullResolveSetsAndKicks(t *testing.T) {
+	a := &app{resolveKick: make(chan struct{}, 1)}
+	a.requestFullResolve()
+	a.mu.Lock()
+	full := a.resolveFull
+	a.mu.Unlock()
+	if !full {
+		t.Fatal("requestFullResolve did not set resolveFull")
+	}
+	select {
+	case <-a.resolveKick:
+	case <-time.After(time.Second):
+		t.Fatal("requestFullResolve did not kick the connect loop")
+	}
+}
+
+// TestWaitRetryWakesOnKick pins that an explicit resolve request interrupts the reconnect backoff.
+func TestWaitRetryWakesOnKick(t *testing.T) {
+	a := &app{resolveKick: make(chan struct{}, 1)}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		a.resolveKick <- struct{}{}
+	}()
+	if !a.waitRetry(context.Background()) {
+		t.Fatal("waitRetry returned false after a kick")
+	}
+}
+
+// TestWaitRetryStopsOnCancel pins that a cancelled manager stops waiting promptly.
+func TestWaitRetryStopsOnCancel(t *testing.T) {
+	a := &app{resolveKick: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if a.waitRetry(ctx) {
+		t.Fatal("waitRetry returned true after cancellation")
 	}
 }

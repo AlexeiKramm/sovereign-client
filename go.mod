@@ -1,4 +1,4 @@
-module github.com/alexeikramm/sovereign-desktop
+module github.com/alexeikramm/sovereign-client
 
 go 1.27
 

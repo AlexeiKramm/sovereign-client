@@ -2,13 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
-	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
-	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
+	"github.com/alexeikramm/sovereign-client/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/ui/render"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
 // panelView is the control window's content. Unlike the pill it persists between dictations, so it
@@ -46,6 +47,8 @@ func (a *app) closePanel() {
 	a.cancelHotkeyCapture()
 	a.panelMu.Lock()
 	a.panelContent.shown = false
+	a.accentDropdownOpen = false
+	a.panelUserMoved = false
 	ov := a.panelWin
 	a.panelMu.Unlock()
 	if ov != nil {
@@ -160,8 +163,47 @@ func (a *app) panelRows() []render.Row {
 			{ID: "position:" + PosTopRight, Text: "Top right", On: s.OverlayPosition == PosTopRight},
 			{ID: "position:" + PosTopLeft, Text: "Top left", On: s.OverlayPosition == PosTopLeft},
 		}},
-		{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup},
+		{Kind: render.RowChips, Text: "Theme", Options: []render.Option{
+			{ID: "theme:" + ThemeSystem, Text: "System", On: s.ThemeMode == ThemeSystem || s.ThemeMode == ""},
+			{ID: "theme:" + ThemeDark, Text: "Dark", On: s.ThemeMode == ThemeDark},
+			{ID: "theme:" + ThemeLight, Text: "Light", On: s.ThemeMode == ThemeLight},
+		}},
+		{Kind: render.RowChips, Text: "Feedback pill duration", Options: []render.Option{
+			{ID: "feedback:1", Text: "1s", On: s.FeedbackDurationSec == 1},
+			{ID: "feedback:2", Text: "2s", On: s.FeedbackDurationSec == 2},
+			{ID: "feedback:3", Text: "3s", On: s.FeedbackDurationSec == 3},
+			{ID: "feedback:off", Text: "Off", On: s.FeedbackDurationSec == -1},
+		}},
 	}
+	a.panelMu.Lock()
+	accentOpen := a.accentDropdownOpen
+	a.panelMu.Unlock()
+
+	currentPresetName := "Cyan"
+	for _, p := range render.Presets {
+		if p.ID == s.ThemePreset {
+			currentPresetName = p.Name
+			break
+		}
+	}
+
+	presetOpts := make([]render.Option, len(render.Presets))
+	for i, p := range render.Presets {
+		presetOpts[i] = render.Option{
+			ID:   "preset:" + p.ID,
+			Text: p.Name,
+			On:   s.ThemePreset == p.ID || (s.ThemePreset == "" && p.ID == DefaultThemePreset),
+		}
+	}
+	rows = append(rows, render.Row{
+		Kind:    render.RowDropdown,
+		ID:      "dropdown:accent",
+		Text:    "Accent color",
+		Detail:  currentPresetName,
+		Options: presetOpts,
+		On:      accentOpen,
+	})
+	rows = append(rows, render.Row{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup})
 	if paired {
 		rows = append(rows, render.Row{Kind: render.RowButton, ID: "unpair", Text: "Unpair…", Detail: server})
 	} else {
@@ -177,10 +219,29 @@ func (a *app) repaintPanel() {
 	view := a.panelContent
 	ov := a.panelWin
 	pos := a.panelPos
-	placed := a.panelPlaced
+	userMoved := a.panelUserMoved
+	lastH := a.panelLastH
+	tab := a.panelActiveTab
+	copiedID := a.panelCopiedID
 	a.panelMu.Unlock()
 	if ov == nil || !view.shown {
 		return
+	}
+
+	var histItems []render.PanelHistoryItem
+	if a.history != nil {
+		for _, it := range a.history.Items() {
+			histItems = append(histItems, render.PanelHistoryItem{
+				ID:        it.ID,
+				TimeAgo:   formatTimeAgo(it.Time),
+				CleanText: it.CleanText,
+				RawText:   it.RawText,
+				Words:     it.Words,
+				AsrMs:     it.AsrMs,
+				CleanupMs: it.CleanupMs,
+				ViewMode:  it.ViewMode,
+			})
+		}
 	}
 
 	work, dpi := winplat.WorkArea(ov.Handle())
@@ -190,10 +251,15 @@ func (a *app) repaintPanel() {
 		Status:      view.status,
 		Committed:   view.committed,
 		Provisional: view.provisional,
+		ActiveTab:   tab,
+		History:     histItems,
+		CopiedID:    copiedID,
 		Rows:        a.panelRows(),
 		Info:        a.panelInfo(),
+		Version:     "v0.9.4",
 		Error:       view.err,
-		Dark:        true,
+		Dark:        a.isDarkTheme(),
+		Preset:      a.themePreset(),
 		Scale:       scale,
 	})
 	if err != nil {
@@ -201,16 +267,12 @@ func (a *app) repaintPanel() {
 		return
 	}
 	cw, ch := p.Frame.Size()
-	if !placed {
-		x, y := anchorPos(work, cw, ch, PosBottomRight, dpi)
-		pos = [2]int{x, y}
-		a.panelMu.Lock()
-		a.panelPos = pos
-		a.panelPlaced = true
-		a.panelMu.Unlock()
-	}
+	pos = computePanelPos(work, cw, ch, dpi, userMoved, pos, lastH)
 
 	a.panelMu.Lock()
+	a.panelPos = pos
+	a.panelPlaced = true
+	a.panelLastH = ch
 	a.panelLayout = p
 	a.panelMu.Unlock()
 
@@ -218,34 +280,47 @@ func (a *app) repaintPanel() {
 	ov.Present(p.Frame.Img, pos[0]-p.Frame.Pad, pos[1]-p.Frame.Pad)
 }
 
-// panelInfo builds the footer lines: the phone's advertised availability, the last utterance's
-// ASR/cleanup timings, the link RTT and the session count. Empty values are omitted so the footer
-// never reserves space it does not use.
-func (a *app) panelInfo() []string {
-	a.mu.Lock()
-	asr, cleanup := a.lastAsrMs, a.lastCleanupMs
-	latency := a.lastLatency
-	sessions := a.sessionCount
-	phone := a.phoneState
-	dictating := a.dictating
-	a.mu.Unlock()
-
-	var info []string
-	// Our own session is reported as BUSY ("another desktop"), which would read as someone else
-	// dictating; the status line already says what we are doing, so omit the line while we hold it.
-	if !dictating {
-		if t := availabilityText(phone); t != "" {
-			info = append(info, t)
+// computePanelPos calculates the window position so that when its size changes (such as expanding
+// the accent color dropdown), it always expands away from the nearest screen edge and stays strictly
+// within the work area.
+func computePanelPos(work winplat.Rect, cw, ch int, dpi int, userMoved bool, lastPos [2]int, lastH int) [2]int {
+	m := int(math.Round(pillMargin * float64(dpi) / 96.0))
+	if !userMoved {
+		// Anchored to bottom-right by default (above taskbar).
+		// When height changes, anchorPos keeps the bottom edge fixed and expands UPWARD.
+		x, y := anchorPos(work, cw, ch, PosBottomRight, dpi)
+		return [2]int{x, y}
+	}
+	pos := lastPos
+	if lastH > 0 && ch != lastH {
+		deltaH := ch - lastH
+		// If in lower half of screen, expand UPWARD away from bottom screen edge.
+		if pos[1]+lastH/2 >= work.Y+work.H/2 {
+			pos[1] -= deltaH
 		}
+		// If in upper half, keep top edge fixed and expand DOWNWARD away from top edge.
 	}
-	if asr > 0 || cleanup > 0 {
-		info = append(info, fmt.Sprintf("Last ASR %d ms · Cleanup %d ms", asr, cleanup))
+	// Clamp strictly within work area bounds
+	if pos[1]+ch > work.Y+work.H-m {
+		pos[1] = work.Y + work.H - m - ch
 	}
-	if latency != "" {
-		info = append(info, "Link "+latency)
+	if pos[1] < work.Y+m {
+		pos[1] = work.Y + m
 	}
-	info = append(info, fmt.Sprintf("Sessions %d", sessions))
-	return info
+	if pos[0]+cw > work.X+work.W-m {
+		pos[0] = work.X + work.W - m - cw
+	}
+	if pos[0] < work.X+m {
+		pos[0] = work.X + m
+	}
+	return pos
+}
+
+// panelInfo builds the footer lines: the phone's advertised availability, the last utterance's
+// panelInfo returns nil: the panel footer only displays the version number now that
+// each history entry shows its own ASR and cleanup timings.
+func (a *app) panelInfo() []string {
+	return nil
 }
 
 // availabilityText describes the phone's advertised pipeline availability (SERVER_STATE, v1.1). It
@@ -325,6 +400,7 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 		nx, ny := cx-dx, cy-dy
 		a.panelMu.Lock()
 		a.panelPos = [2]int{nx, ny}
+		a.panelUserMoved = true
 		a.panelMu.Unlock()
 		ov.Move(nx, ny)
 	case winplat.MouseUp:
@@ -336,15 +412,63 @@ func (a *app) onPanelMouse(ev winplat.MouseEvent) {
 
 // panelAction performs a control's action by id.
 func (a *app) panelAction(c render.Control) {
+	if c.ID != "dropdown:accent" && !strings.HasPrefix(c.ID, "preset:") {
+		a.panelMu.Lock()
+		if a.accentDropdownOpen {
+			a.accentDropdownOpen = false
+			a.panelMu.Unlock()
+			a.refreshPanel()
+		} else {
+			a.panelMu.Unlock()
+		}
+	}
+
 	switch {
 	case c.Kind == render.ControlClose:
 		a.closePanel()
+	case c.ID == "tab:dictations":
+		a.panelMu.Lock()
+		a.panelActiveTab = render.TabDictations
+		a.panelMu.Unlock()
+		a.refreshPanel()
+	case c.ID == "tab:settings":
+		a.panelMu.Lock()
+		a.panelActiveTab = render.TabSettings
+		a.panelMu.Unlock()
+		a.refreshPanel()
+	case strings.HasPrefix(c.ID, "copy:"):
+		id := strings.TrimPrefix(c.ID, "copy:")
+		a.copyHistoryItem(id)
+	case strings.HasPrefix(c.ID, "histmode:"):
+		id := strings.TrimPrefix(c.ID, "histmode:")
+		a.cycleHistoryMode(id)
+	case strings.HasPrefix(c.ID, "feedback:"):
+		arg := strings.TrimPrefix(c.ID, "feedback:")
+		if arg == "off" || arg == "0" {
+			a.setFeedbackDuration(-1)
+		} else {
+			var sec int
+			fmt.Sscanf(arg, "%d", &sec)
+			a.setFeedbackDuration(sec)
+		}
+	case c.ID == "dropdown:accent":
+		a.panelMu.Lock()
+		a.accentDropdownOpen = !a.accentDropdownOpen
+		a.panelMu.Unlock()
+		a.refreshPanel()
 	case strings.HasPrefix(c.ID, "mode:"):
 		a.setMode(strings.TrimPrefix(c.ID, "mode:"))
 	case strings.HasPrefix(c.ID, "insertion:"):
 		a.setInsertion(strings.TrimPrefix(c.ID, "insertion:"))
 	case strings.HasPrefix(c.ID, "position:"):
 		a.setPosition(strings.TrimPrefix(c.ID, "position:"))
+	case strings.HasPrefix(c.ID, "theme:"):
+		a.setThemeMode(strings.TrimPrefix(c.ID, "theme:"))
+	case strings.HasPrefix(c.ID, "preset:"):
+		a.panelMu.Lock()
+		a.accentDropdownOpen = false
+		a.panelMu.Unlock()
+		a.setThemePreset(strings.TrimPrefix(c.ID, "preset:"))
 	case c.ID == "startup":
 		a.toggleStartup()
 	case c.ID == "hotkey:set":
@@ -442,12 +566,20 @@ func (a *app) cancelHotkeyCapture() {
 // setLiveCommitted/provisional/error update both the pill and the panel, so the two surfaces always
 // agree about the text being dictated.
 func (a *app) setLiveCommitted(text string) {
-	a.updatePill(func(v *pillView) { v.committed = text })
+	a.updatePill(func(v *pillView) {
+		if v.insertedWords == 0 {
+			v.committed = text
+		}
+	})
 	a.updatePanel(func(v *panelView) { v.committed = text })
 }
 
 func (a *app) setLiveProvisional(text string) {
-	a.updatePill(func(v *pillView) { v.provisional = text })
+	a.updatePill(func(v *pillView) {
+		if v.insertedWords == 0 {
+			v.provisional = text
+		}
+	})
 	a.updatePanel(func(v *panelView) { v.provisional = text })
 }
 
@@ -477,5 +609,92 @@ func (a *app) countSession() {
 	a.mu.Lock()
 	a.sessionCount++
 	a.mu.Unlock()
+	a.refreshPanel()
+}
+
+// formatTimeAgo produces a concise relative time string for history cards.
+func formatTimeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "Just now"
+	case d < 2*time.Minute:
+		return "1 min ago"
+	case d < time.Hour:
+		return fmt.Sprintf("%d mins ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hrs ago", int(d.Hours()))
+	default:
+		return t.Format("Jan 02, 15:04")
+	}
+}
+
+// copyHistoryItem copies the card text to the clipboard and shows feedback.
+func (a *app) copyHistoryItem(id string) {
+	if a.history == nil {
+		return
+	}
+	var textToCopy string
+	for _, it := range a.history.Items() {
+		if it.ID == id {
+			switch it.ViewMode {
+			case ViewRaw:
+				textToCopy = it.RawText
+			case ViewDiff:
+				textToCopy = "RAW:\n" + it.RawText + "\n\nCLEAN:\n" + it.CleanText
+			default:
+				textToCopy = it.CleanText
+			}
+			break
+		}
+	}
+	if textToCopy != "" {
+		_ = winplat.CopyText(textToCopy)
+		a.panelMu.Lock()
+		a.panelCopiedID = id
+		a.panelMu.Unlock()
+		a.refreshPanel()
+
+		time.AfterFunc(1500*time.Millisecond, func() {
+			a.panelMu.Lock()
+			if a.panelCopiedID == id {
+				a.panelCopiedID = ""
+			}
+			a.panelMu.Unlock()
+			a.refreshPanel()
+		})
+	}
+}
+
+// cycleHistoryMode cycles between Clean, Raw, and Diff views for a history card.
+func (a *app) cycleHistoryMode(id string) {
+	if a.history == nil {
+		return
+	}
+	for _, it := range a.history.Items() {
+		if it.ID == id {
+			next := ViewClean
+			switch it.ViewMode {
+			case ViewClean:
+				next = ViewRaw
+			case ViewRaw:
+				next = ViewDiff
+			case ViewDiff:
+				next = ViewClean
+			}
+			a.history.SetViewMode(id, next)
+			a.refreshPanel()
+			return
+		}
+	}
+}
+
+// setFeedbackDuration updates the pill's auto-dismiss interval.
+func (a *app) setFeedbackDuration(sec int) {
+	a.mu.Lock()
+	a.settings.FeedbackDurationSec = sec
+	s := a.settings
+	a.mu.Unlock()
+	a.persist(s)
 	a.refreshPanel()
 }

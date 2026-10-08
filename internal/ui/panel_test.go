@@ -4,28 +4,21 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
-	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
+	"github.com/alexeikramm/sovereign-client/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/ui/render"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
-// TestPanelInfoOmitsEmptyValues pins the footer's content: timings and latency only appear once
-// they exist, and the session count is always shown.
-func TestPanelInfoOmitsEmptyValues(t *testing.T) {
+// TestPanelInfoEmpty pins that the footer no longer shows session/timing stats since each history
+// card displays its own ASR and LLM processing times.
+func TestPanelInfoEmpty(t *testing.T) {
 	a := &app{}
 	a.sessionCount = 2
-	got := a.panelInfo()
-	if len(got) != 1 || got[0] != "Sessions 2" {
-		t.Fatalf("panelInfo with only sessions = %q, want [Sessions 2]", got)
-	}
-
 	a.lastAsrMs, a.lastCleanupMs = 1283, 547
 	a.lastLatency = "rtt=12ms"
-	got = a.panelInfo()
-	if len(got) != 3 {
-		t.Fatalf("panelInfo = %q, want three lines", got)
-	}
-	if got[0] != "Last ASR 1283 ms · Cleanup 547 ms" || got[1] != "Link rtt=12ms" || got[2] != "Sessions 2" {
-		t.Fatalf("panelInfo = %q", got)
+	got := a.panelInfo()
+	if len(got) != 0 {
+		t.Fatalf("panelInfo = %q, want empty (footer only displays version number)", got)
 	}
 }
 
@@ -108,11 +101,79 @@ func TestPanelActionUpdatesSettings(t *testing.T) {
 	if a.settings.OverlayPosition != PosTopLeft {
 		t.Fatalf("position = %q, want %q", a.settings.OverlayPosition, PosTopLeft)
 	}
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "theme:" + ThemeDark})
+	if a.settings.ThemeMode != ThemeDark {
+		t.Fatalf("theme = %q, want %q", a.settings.ThemeMode, ThemeDark)
+	}
+	if !a.isDarkTheme() {
+		t.Fatal("isDarkTheme should be true when ThemeDark")
+	}
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "theme:" + ThemeLight})
+	if a.settings.ThemeMode != ThemeLight {
+		t.Fatalf("theme = %q, want %q", a.settings.ThemeMode, ThemeLight)
+	}
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "dropdown:accent"})
+	if !a.accentDropdownOpen {
+		t.Fatal("dropdown:accent did not open dropdown")
+	}
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "preset:amber"})
+	if a.settings.ThemePreset != "amber" {
+		t.Fatalf("preset = %q, want %q", a.settings.ThemePreset, "amber")
+	}
+	if a.accentDropdownOpen {
+		t.Fatal("preset selection did not close dropdown")
+	}
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "feedback:3"})
+	if a.settings.FeedbackDurationSec != 3 {
+		t.Fatalf("feedback = %d, want 3", a.settings.FeedbackDurationSec)
+	}
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "feedback:off"})
+	if a.settings.FeedbackDurationSec != -1 {
+		t.Fatalf("feedback = %d, want -1", a.settings.FeedbackDurationSec)
+	}
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "tab:settings"})
+	if a.panelActiveTab != render.TabSettings {
+		t.Fatalf("active tab = %d, want TabSettings", a.panelActiveTab)
+	}
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "tab:dictations"})
+	if a.panelActiveTab != render.TabDictations {
+		t.Fatalf("active tab = %d, want TabDictations", a.panelActiveTab)
+	}
 	// A close control must not be mistaken for a chip (its Kind is the zero value).
 	a.panelContent.shown = true
 	a.panelAction(render.Control{Kind: render.ControlClose})
 	if a.panelContent.shown {
 		t.Fatal("close control did not close the panel")
+	}
+}
+
+// TestPanelHistoryActions verifies copy and view-mode cycling on history cards.
+func TestPanelHistoryActions(t *testing.T) {
+	a := &app{}
+	a.history = NewHistoryStore("")
+	it := a.history.Add("Hello world", "hello world raw", 200, 100)
+
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "histmode:" + it.ID})
+	items := a.history.Items()
+	if items[0].ViewMode != ViewRaw {
+		t.Fatalf("view mode = %q, want %q", items[0].ViewMode, ViewRaw)
+	}
+
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "histmode:" + it.ID})
+	items = a.history.Items()
+	if items[0].ViewMode != ViewDiff {
+		t.Fatalf("view mode = %q, want %q", items[0].ViewMode, ViewDiff)
+	}
+
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "histmode:" + it.ID})
+	items = a.history.Items()
+	if items[0].ViewMode != ViewClean {
+		t.Fatalf("view mode = %q, want %q", items[0].ViewMode, ViewClean)
+	}
+
+	a.panelAction(render.Control{Kind: render.ControlButton, ID: "copy:" + it.ID})
+	if a.panelCopiedID != it.ID {
+		t.Fatalf("copied ID = %q, want %q", a.panelCopiedID, it.ID)
 	}
 }
 
@@ -189,25 +250,43 @@ func TestBusyClause(t *testing.T) {
 	}
 }
 
-// TestPanelInfoShowsAvailability checks the availability line leads the footer while the phone is
-// taken, disappears when it is idle, and is omitted for our own session (which the phone reports as
-// BUSY "another desktop" and would otherwise read as someone else dictating).
-func TestPanelInfoShowsAvailability(t *testing.T) {
-	a := &app{}
-	a.phoneState = core.ServerStatePayload{State: core.ServerStateReserved, HolderName: "Phone"}
-	info := a.panelInfo()
-	if len(info) == 0 || info[0] != "Phone busy — the phone's pill is dictating" {
-		t.Fatalf("panelInfo = %q, want the availability line first", info)
-	}
+// TestComputePanelPosAnchoredExpandsUpward verifies that when anchored to bottom-right,
+// expanding height (e.g. opening dropdown) moves the top edge UP and keeps the bottom pinned above the taskbar.
+func TestComputePanelPosAnchoredExpandsUpward(t *testing.T) {
+	work := winplat.Rect{X: 0, Y: 0, W: 1920, H: 1040}
+	dpi := 96
+	cw := 380
 
-	a.phoneState = core.ServerStatePayload{}
-	if info := a.panelInfo(); len(info) != 1 || info[0] != "Sessions 0" {
-		t.Fatalf("panelInfo when idle = %q, want only the session count", info)
-	}
+	posClosed := computePanelPos(work, cw, 480, dpi, false, [2]int{0, 0}, 0)
+	posOpen := computePanelPos(work, cw, 720, dpi, false, posClosed, 480)
 
-	a.dictating = true
-	a.phoneState = core.ServerStatePayload{State: core.ServerStateBusy, HolderName: "another desktop"}
-	if info := a.panelInfo(); len(info) != 1 || info[0] != "Sessions 0" {
-		t.Fatalf("panelInfo while dictating = %q, want the availability line omitted", info)
+	bottomClosed := posClosed[1] + 480
+	bottomOpen := posOpen[1] + 720
+
+	if bottomClosed != bottomOpen {
+		t.Errorf("bottom changed on expand: closed bottom %d vs open bottom %d", bottomClosed, bottomOpen)
+	}
+	if posOpen[1] >= posClosed[1] {
+		t.Errorf("window did not expand upward: closed y=%d, open y=%d", posClosed[1], posOpen[1])
+	}
+}
+
+// TestComputePanelPosUserMovedExpandsAwayFromScreenEdge checks that when moved to the lower half
+// of the screen, height expansion grows upward and stays within work area bounds.
+func TestComputePanelPosUserMovedExpandsAwayFromScreenEdge(t *testing.T) {
+	work := winplat.Rect{X: 0, Y: 0, W: 1920, H: 1040}
+	dpi := 96
+	cw := 380
+
+	// User placed window at (500, 500) with height 480 (bottom at 980, in lower half)
+	initialPos := [2]int{500, 500}
+	expandedPos := computePanelPos(work, cw, 720, dpi, true, initialPos, 480)
+
+	// Bottom should remain at 980 (500 + 480 - 720 = 260)
+	if expandedPos[1]+720 != 980 {
+		t.Errorf("bottom edge shifted: got y=%d + h=720 = %d, want 980", expandedPos[1], expandedPos[1]+720)
+	}
+	if expandedPos[1] != 260 {
+		t.Errorf("expected y=260, got %d", expandedPos[1])
 	}
 }

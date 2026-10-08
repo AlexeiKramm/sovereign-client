@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
 // Captured is a chord read during hotkey capture: the non-modifier key plus the modifiers held when

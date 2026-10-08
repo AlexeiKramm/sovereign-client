@@ -1,4 +1,4 @@
-# Sovereign Desktop
+# Sovereign Client
 
 The Windows-first desktop client for **Sovereign**'s phone-as-dictation-server feature. Your phone
 does the listening — streaming ASR plus on-device LLM cleanup — while this tray app discovers it on
@@ -47,13 +47,13 @@ go build ./...
 
 With no arguments the binary runs the tray app: it claims a single-instance mutex, loads any DPAPI
 credentials, discovers the phone (mDNS, with the LAN-probe fallback), connects, and shows state in
-the tray. Its log is at `%LOCALAPPDATA%\Sovereign\sovereign-desktop.log` (a GUI-subsystem binary has
+the tray. Its log is at `%LOCALAPPDATA%\Sovereign\sovereign-client.log` (a GUI-subsystem binary has
 no console).
 
 ```powershell
 # Tray app (default):
-go run ./cmd/sovereign-desktop
-go run ./cmd/sovereign-desktop -tray -addr 192.168.1.5:8765   # skip discovery
+go run ./cmd/sovereign-client
+go run ./cmd/sovereign-client -tray -addr 192.168.1.5:8765   # skip discovery
 ```
 
 The tray menu is deliberately small: the live state, a 5-second **Test dictation**, **Pair with
@@ -98,21 +98,21 @@ focus since you started, nothing is written and the tray reports it. Typing is N
 keystrokes, so it is **not** a single undo step.
 
 The `-ldflags "-s -w -H=windowsgui"` build has no console; diagnostics go to
-`%LOCALAPPDATA%\Sovereign\sovereign-desktop.log`.
+`%LOCALAPPDATA%\Sovereign\sovereign-client.log`.
 
 The flags below drive the same transport headlessly for development and verification:
 
 ```powershell
 # Manual host:port (mDNS is blocked by AP/client isolation and misrouted by VPNs):
-go run ./cmd/sovereign-desktop -addr 192.168.1.5:8765 -pin <server-spki>
+go run ./cmd/sovereign-client -addr 192.168.1.5:8765 -pin <server-spki>
 
 # First-time mutual-accept pairing: the phone shows an approval dialog; the fingerprint
 # printed here must match the phone's screen.
-go run ./cmd/sovereign-desktop -pair -addr 192.168.1.5:8765
+go run ./cmd/sovereign-client -pair -addr 192.168.1.5:8765
 
 # Browse only, and a one-shot dictation demo:
-go run ./cmd/sovereign-desktop -discover
-go run ./cmd/sovereign-desktop -once -seconds 5 -v
+go run ./cmd/sovereign-client -discover
+go run ./cmd/sovereign-client -once -seconds 5 -v
 ```
 
 Credentials are stored DPAPI-protected at `%LOCALAPPDATA%\Sovereign\credentials.bin`; the

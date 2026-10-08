@@ -4,19 +4,20 @@ import (
 	"math"
 	"time"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
-	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
-	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/ui/render"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
 // pillView is the overlay's current content, guarded by app.pillMu. shown is the controller's own
 // state, separate from the window's visibility: the window is created once and shown/hidden.
 type pillView struct {
-	status      string
-	committed   string
-	provisional string
-	err         bool
-	shown       bool
+	status        string
+	committed     string
+	provisional   string
+	insertedWords int
+	err           bool
+	shown         bool
 }
 
 // pillMargin is the logical-pixel gap between the card and the work-area edge.
@@ -40,10 +41,77 @@ func (a *app) startPill() {
 	a.repaintPill()
 }
 
-// showBusyPill shows the pill briefly with a refusal message, so a hotkey press the phone refuses
-// is visible where the user is looking (the phone's own pill shows a BUSY mark, CHUNK-7). It is
-// replaced by a real session if one starts, and auto-hides otherwise.
-func (a *app) showBusyPill(msg string) {
+// showConnectingPill shows a neutral, persistent status while the on-demand discovery ladder runs.
+// Unlike showErrorPill it never auto-dismisses: it is replaced by startPill when the session
+// starts, or by showErrorPill if discovery fails. Esc dismisses it.
+func (a *app) showConnectingPill(status string) {
+	if a.ensureOverlay() == nil {
+		return
+	}
+	a.pillMu.Lock()
+	a.pill = pillView{status: status, shown: true}
+	a.pillMu.Unlock()
+	a.watchEsc()
+	a.repaintPill()
+}
+
+// showInsertedPill displays the success feedback state ("Inserted X words") in-place after utterance commit
+// and injection, preserving the card geometry and dimming the final text, then automatically dismisses according to settings.FeedbackDurationSec.
+func (a *app) showInsertedPill(words int, delivery string) {
+	ov := a.ensureOverlay()
+	if ov == nil {
+		return
+	}
+	a.pillMu.Lock()
+	w := a.escWatcher
+	a.escWatcher = nil
+	if delivery != "" {
+		a.pill.committed = delivery
+	}
+	a.pill.provisional = ""
+	a.pill.insertedWords = words
+	a.pill.shown = true
+	a.pillMu.Unlock()
+	if w != nil {
+		_ = w.Close()
+	}
+	a.repaintPill()
+
+	a.mu.Lock()
+	dur := a.settings.FeedbackDurationSec
+	a.mu.Unlock()
+	if dur <= 0 {
+		a.hidePill()
+		return
+	}
+
+	time.AfterFunc(time.Duration(dur)*time.Second, func() {
+		a.pillMu.Lock()
+		stale := a.pill.shown && a.pill.insertedWords == words
+		if stale {
+			a.pill.shown = false
+		}
+		a.pillMu.Unlock()
+		if stale {
+			ov.Hide()
+		}
+	})
+}
+
+// hideListeningPill takes the overlay down only if it is NOT currently showing feedback (inserted capsule or error).
+func (a *app) hideListeningPill() {
+	a.pillMu.Lock()
+	if a.pill.insertedWords > 0 || a.pill.err {
+		a.pillMu.Unlock()
+		return
+	}
+	a.pillMu.Unlock()
+	a.hidePill()
+}
+
+// showErrorPill shows the pill in error state with a failure description (e.g. "Phone offline",
+// "Phone busy", etc.), then automatically auto-dismisses after the feedback interval.
+func (a *app) showErrorPill(msg string) {
 	ov := a.ensureOverlay()
 	if ov == nil {
 		return
@@ -53,7 +121,14 @@ func (a *app) showBusyPill(msg string) {
 	a.pillMu.Unlock()
 	a.repaintPill()
 
-	time.AfterFunc(2*time.Second, func() {
+	a.mu.Lock()
+	dur := a.settings.FeedbackDurationSec
+	if dur < 2 {
+		dur = 2 // give at least 2 seconds for readable error feedback
+	}
+	a.mu.Unlock()
+
+	time.AfterFunc(time.Duration(dur)*time.Second, func() {
 		a.pillMu.Lock()
 		stale := a.pill.shown && a.pill.err && a.pill.status == msg
 		if stale {
@@ -64,6 +139,11 @@ func (a *app) showBusyPill(msg string) {
 			ov.Hide()
 		}
 	})
+}
+
+// showBusyPill delegates to showErrorPill.
+func (a *app) showBusyPill(msg string) {
+	a.showErrorPill(msg)
 }
 
 // hidePill takes the overlay down and stops the Esc watcher. It is idempotent.
@@ -115,7 +195,11 @@ func (a *app) ensureOverlay() *winplat.Overlay {
 
 // setPillStatus updates the header line ("Listening…", "Finishing…", …).
 func (a *app) setPillStatus(status string) {
-	a.updatePill(func(v *pillView) { v.status = status })
+	a.updatePill(func(v *pillView) {
+		if v.insertedWords == 0 && !v.err {
+			v.status = status
+		}
+	})
 }
 
 // updatePill applies fn to the view and repaints, but only while the pill is showing, so late
@@ -150,12 +234,14 @@ func (a *app) repaintPill() {
 	work, dpi := winplat.WorkArea(target)
 	scale := float64(dpi) / 96.0
 	frame, err := render.Render(render.Model{
-		Status:      view.status,
-		Committed:   view.committed,
-		Provisional: view.provisional,
-		Error:       view.err,
-		Dark:        true,
-		Scale:       scale,
+		Status:        view.status,
+		Committed:     view.committed,
+		Provisional:   view.provisional,
+		InsertedWords: view.insertedWords,
+		Error:         view.err,
+		Dark:          a.isDarkTheme(),
+		Preset:        a.themePreset(),
+		Scale:         scale,
 	})
 	if err != nil {
 		a.logf("pill render failed: %v", err)
@@ -212,12 +298,22 @@ func (a *app) watchEsc() {
 	}()
 }
 
-// cancelDictation discards the active session (no UTTERANCE_DONE, so nothing is injected); the
-// phone answers SESSION_RELEASED, which hides the pill.
+// cancelDictation discards an active session (no UTTERANCE_DONE, so nothing is injected); the phone
+// answers SESSION_RELEASED, which hides the pill. It also abandons a deferred dictation that is still
+// waiting for the link, so Esc on the "Connecting…" pill really cancels.
 func (a *app) cancelDictation() {
 	a.mu.Lock()
 	c := a.client
+	pending := a.pending
+	if pending {
+		a.pending = false
+		a.pendingTest = false
+	}
 	a.mu.Unlock()
+	if pending && c == nil {
+		a.hidePill()
+		return
+	}
 	if c == nil {
 		return
 	}

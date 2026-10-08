@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"strconv"
 	"strings"
 
 	"golang.org/x/image/font"
@@ -33,16 +34,20 @@ const (
 // Model is what the pill draws, in logical units. Scale is the monitor DPI scale (1.0 = 96 DPI);
 // Render multiplies every metric by it, so the caller passes device-independent content only.
 type Model struct {
-	// Status is the header line, e.g. "Listening…" or "Polishing…".
+	// Status is the header line, e.g. "Listening…", "Phone offline", etc.
 	Status string
 	// Committed is the settled (cleaned) text, drawn in the near-white OnSurface colour.
 	Committed string
 	// Provisional is the live tail of the unit in flight, drawn in the muted OnSurfaceVariant.
 	Provisional string
+	// InsertedWords, when > 0, renders the success "Inserted X words" state.
+	InsertedWords int
 	// Error switches the header dot + label to the error colour.
 	Error bool
 	// Dark selects the dark palette (the default for a floating overlay).
 	Dark bool
+	// Preset selects the M3 accent color preset (default cyan).
+	Preset string
 	// Scale is the monitor DPI scale.
 	Scale float64
 }
@@ -71,7 +76,7 @@ func Render(m Model) (Frame, error) {
 	if scale <= 0 {
 		scale = 1
 	}
-	theme := ThemeFor(m.Dark)
+	theme := ThemeForPreset(m.Preset, m.Dark)
 
 	statusFace, err := newFace(statusFont * scale)
 	if err != nil {
@@ -86,8 +91,25 @@ func Render(m Model) (Frame, error) {
 
 	innerPad := pillPadding * scale
 	cardW := pillWidth * scale
-	contentW := cardW - 2*innerPad
 
+	// Header label determination
+	label := m.Status
+	isInserted := m.InsertedWords > 0
+	if isInserted {
+		if m.InsertedWords == 1 {
+			label = "Inserted 1 word"
+		} else {
+			label = "Inserted " + strconv.Itoa(m.InsertedWords) + " words"
+		}
+	} else if label == "" {
+		if m.Error {
+			label = "Dictation error"
+		} else {
+			label = "Listening…"
+		}
+	}
+
+	contentW := cardW - 2*innerPad
 	lines := wrap(bodyFace, bodySpans(m.Committed, m.Provisional, theme), contentW)
 	ellipsis := false
 	if len(lines) > maxBodyLines {
@@ -103,40 +125,53 @@ func Render(m Model) (Frame, error) {
 		cardH += bodyGapTop*scale + bodyH
 	}
 
-	shadow := int(math.Ceil(shadowSpread * scale))
-	totalW := int(math.Round(cardW)) + 2*shadow
-	totalH := int(math.Round(cardH)) + 2*shadow
+	totalW := int(math.Round(cardW))
+	totalH := int(math.Round(cardH))
 
 	img := image.NewRGBA(image.Rect(0, 0, totalW, totalH))
-	cardX := float64(shadow)
-	cardY := float64(shadow)
+	cardX := 0.0
+	cardY := 0.0
 
-	drawShadow(img, cardX, cardY, cardW, cardH, pillRadius*scale, shadow, scale, theme)
-	// Border: an outer rounded rect in the border colour, then the surface inset by the border
-	// width, which leaves a hairline ring that follows the corner radius.
-	fillRoundRect(img, cardX, cardY, cardW, cardH, pillRadius*scale, theme.Border)
+	// Outer border: highlight border on error/success
+	borderColor := theme.Border
+	if m.Error {
+		borderColor = theme.Error
+	} else if isInserted {
+		borderColor = theme.Success
+	}
+	fillRoundRect(img, cardX, cardY, cardW, cardH, pillRadius*scale, borderColor)
 	bw := pillBorder * scale
 	fillRoundRect(img, cardX+bw, cardY+bw, cardW-2*bw, cardH-2*bw, pillRadius*scale-bw, theme.Surface)
 
-	// Header: dot + status label.
-	dotCol := theme.Primary
-	label := m.Status
-	if m.Error {
-		dotCol = theme.Error
-	}
-	if label == "" {
-		label = "Listening…"
-	}
+	// Status icon / dot:
 	dotX := cardX + innerPad
 	dotY := cardY + innerPad + (statusH-statusDot*scale)/2
-	fillRoundRect(img, dotX, dotY, statusDot*scale, statusDot*scale, statusDot*scale/2, dotCol)
 
-	statusCol := theme.OnSurfaceVariant
+	var statusCol color.RGBA
 	if m.Error {
 		statusCol = theme.Error
+		fillRoundRect(img, dotX, dotY, statusDot*scale, statusDot*scale, statusDot*scale/2, theme.Error)
+	} else if isInserted {
+		statusCol = theme.Success
+		drawCheckmark(img, dotX+statusDot*scale/2, dotY+statusDot*scale/2, statusDot*scale*1.4, theme.Success)
+	} else {
+		// Active Listening: theme-colored pulsing halo + center dot
+		statusCol = theme.Primary
+		haloSz := statusDot * scale * 1.8
+		haloCol := premul(theme.Primary.R, theme.Primary.G, theme.Primary.B, 0x40)
+		fillRoundRect(img, dotX-(haloSz-statusDot*scale)/2, dotY-(haloSz-statusDot*scale)/2, haloSz, haloSz, haloSz/2, haloCol)
+		fillRoundRect(img, dotX, dotY, statusDot*scale, statusDot*scale, statusDot*scale/2, theme.Primary)
 	}
+
 	statusBase := cardY + innerPad + baseline(statusFace, statusH)
 	drawText(img, statusFace, statusCol, dotX+statusDot*scale+statusDotGap*scale, statusBase, label)
+
+	// In listening mode, show a subtle "Esc" hint on the right edge from frame 0
+	if !isInserted && !m.Error {
+		escW := float64(font.MeasureString(statusFace, "Esc").Ceil())
+		escX := cardX + cardW - innerPad - escW
+		drawText(img, statusFace, theme.OnSurfaceVariant, escX, statusBase, "Esc")
+	}
 
 	// Body: settled text in white, live tail in grey, wrapped to the card width.
 	if len(lines) > 0 {
@@ -150,13 +185,17 @@ func Render(m Model) (Frame, error) {
 				x += float64(font.MeasureString(bodyFace, "…").Ceil())
 			}
 			for _, w := range line {
-				drawText(img, bodyFace, w.col, x, base, w.text)
+				col := w.col
+				if isInserted {
+					col = theme.OnSurfaceVariant // subtle muted tone confirming settled/inserted text
+				}
+				drawText(img, bodyFace, col, x, base, w.text)
 				x += w.width + float64(font.MeasureString(bodyFace, " ").Ceil())
 			}
 		}
 	}
 
-	return Frame{Img: img, Pad: shadow}, nil
+	return Frame{Img: img, Pad: 0}, nil
 }
 
 // bodySpans is the committed/provisional split: the settled text in OnSurface, the live tail in
@@ -179,46 +218,96 @@ type span struct {
 }
 
 type word struct {
-	text  string
-	col   color.RGBA
-	width float64
+	text       string
+	col        color.RGBA
+	width      float64
+	strike     bool
+	glueToNext bool
 }
 
-// wrap flows the spans into lines that fit maxWidth, keeping each word's colour. Words are split on
-// runs of whitespace; "\n" forces a line break. It is deliberately simple: the pill shows prose, so
-// per-word flow is enough and no hyphenation is attempted.
+// wrap flows the spans into lines that fit maxWidth, keeping each word's colour.
 func wrap(face font.Face, spans []span, maxWidth float64) [][]word {
 	if maxWidth <= 0 {
 		return nil
 	}
-	spaceW := float64(font.MeasureString(face, " ").Ceil())
-	var lines [][]word
-	var cur []word
-	curW := 0.0
-	flush := func() {
-		if len(cur) > 0 {
-			lines = append(lines, cur)
-		}
-		cur = nil
-		curW = 0
-	}
+	var words []word
 	for _, sp := range spans {
 		for _, tok := range tokenize(sp.text) {
 			if tok == "\n" {
-				flush()
+				words = append(words, word{text: "\n"})
 				continue
 			}
 			w := float64(font.MeasureString(face, tok).Ceil())
-			if len(cur) > 0 {
-				if curW+spaceW+w > maxWidth {
-					flush()
-				} else {
-					curW += spaceW
-				}
-			}
-			cur = append(cur, word{text: tok, col: sp.col, width: w})
-			curW += w
+			words = append(words, word{text: tok, col: sp.col, width: w})
 		}
+	}
+	return wrapWords(face, words, maxWidth)
+}
+
+// wrapWords flows words into lines up to maxWidth, preserving glued clusters together on the same line.
+func wrapWords(face font.Face, words []word, maxWidth float64) [][]word {
+	if maxWidth <= 0 || len(words) == 0 {
+		return nil
+	}
+	spaceW := float64(font.MeasureString(face, " ").Ceil())
+
+	// Group contiguous words connected by glueToNext into unbreakable clusters
+	type cluster struct {
+		words []word
+		width float64
+	}
+	var clusters []cluster
+	var curCluster []word
+	curClusterW := 0.0
+
+	for _, w := range words {
+		if w.text == "\n" {
+			if len(curCluster) > 0 {
+				clusters = append(clusters, cluster{words: curCluster, width: curClusterW})
+				curCluster = nil
+				curClusterW = 0
+			}
+			clusters = append(clusters, cluster{words: []word{w}, width: 0})
+			continue
+		}
+		curCluster = append(curCluster, w)
+		curClusterW += w.width
+		if !w.glueToNext {
+			clusters = append(clusters, cluster{words: curCluster, width: curClusterW})
+			curCluster = nil
+			curClusterW = 0
+		}
+	}
+	if len(curCluster) > 0 {
+		clusters = append(clusters, cluster{words: curCluster, width: curClusterW})
+	}
+
+	var lines [][]word
+	var curLine []word
+	curLineW := 0.0
+
+	flush := func() {
+		if len(curLine) > 0 {
+			lines = append(lines, curLine)
+		}
+		curLine = nil
+		curLineW = 0
+	}
+
+	for _, cl := range clusters {
+		if len(cl.words) == 1 && cl.words[0].text == "\n" {
+			flush()
+			continue
+		}
+		if len(curLine) > 0 {
+			if curLineW+spaceW+cl.width > maxWidth {
+				flush()
+			} else {
+				curLineW += spaceW
+			}
+		}
+		curLine = append(curLine, cl.words...)
+		curLineW += cl.width
 	}
 	flush()
 	return lines
@@ -299,14 +388,22 @@ func fillRoundRect(img *image.RGBA, x, y, w, h, r float64, col color.RGBA) {
 }
 
 // drawText draws s with its baseline at (x, y).
+// drawText draws s with its baseline at (x, y) using gamma-corrected linear-light antialiasing.
 func drawText(img *image.RGBA, face font.Face, col color.RGBA, x, y float64, s string) {
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(col),
-		Face: face,
-		Dot:  fixed.Point26_6{X: fixed.Int26_6(math.Round(x * 64)), Y: fixed.Int26_6(math.Round(y * 64))},
+	dot := fixed.Point26_6{
+		X: fixed.Int26_6(math.Round(x * 64)),
+		Y: fixed.Int26_6(math.Round(y * 64)),
 	}
-	d.DrawString(s)
+	drawTextGamma(img, face, col, dot, s)
+}
+
+// drawTextEmboldened draws s with its baseline at (x, y) with synthesized Medium/SemiBold weight.
+func drawTextEmboldened(img *image.RGBA, face font.Face, col color.RGBA, x, y float64, s string) {
+	dot := fixed.Point26_6{
+		X: fixed.Int26_6(math.Round(x * 64)),
+		Y: fixed.Int26_6(math.Round(y * 64)),
+	}
+	drawTextBold(img, face, col, dot, s)
 }
 
 // baseline returns the drop from the top of a lineHeight-tall row to the text baseline, so a line

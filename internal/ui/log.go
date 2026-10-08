@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/core"
 )
 
 // maxLogBytes caps the tray log. On startup an over-size log is truncated; otherwise output is
@@ -23,7 +23,7 @@ func OpenLog() (*log.Logger, func(), error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
 	}
-	return openLogAt(filepath.Join(dir, "sovereign-desktop.log"))
+	return openLogAt(filepath.Join(dir, "sovereign-client.log"))
 }
 
 func openLogAt(path string) (*log.Logger, func(), error) {

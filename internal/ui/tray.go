@@ -4,35 +4,32 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"fyne.io/systray"
 
-	"github.com/alexeikramm/sovereign-desktop/internal/core"
-	"github.com/alexeikramm/sovereign-desktop/internal/core/iface"
-	"github.com/alexeikramm/sovereign-desktop/internal/ui/render"
-	winplat "github.com/alexeikramm/sovereign-desktop/internal/windows"
+	"github.com/alexeikramm/sovereign-client/internal/core"
+	"github.com/alexeikramm/sovereign-client/internal/core/iface"
+	"github.com/alexeikramm/sovereign-client/internal/ui/render"
+	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
 // Options parameterises the tray application.
 type Options struct {
-	Identity        core.Identity
-	Store           core.CredentialStore
-	SettingsPath    string        // where settings.json lives
-	Addr            string        // optional manual host:port, bypassing discovery
-	Pin             string        // optional pin for Addr
-	DiscoverTimeout time.Duration // mDNS/probe timeout; defaults to 5 s
-	Logf            func(format string, args ...any)
+	Identity     core.Identity
+	Store        core.CredentialStore
+	SettingsPath string // where settings.json lives
+	Addr         string // optional manual host:port, bypassing discovery
+	Pin          string // optional pin for Addr
+	Logf         func(format string, args ...any)
 }
 
 // Run starts the tray and blocks until the user quits. It must be called from the main goroutine:
 // systray owns the message loop.
 func Run(opts Options) {
-	if opts.DiscoverTimeout == 0 {
-		opts.DiscoverTimeout = 5 * time.Second
-	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
@@ -59,6 +56,13 @@ type app struct {
 	client        *core.Client
 	connecting    bool
 	connCancel    context.CancelFunc
+	attemptCancel context.CancelFunc      // cancels only the in-flight connect attempt, not the manager
+	connState     core.ConnState          // last transport state reported by OnConn
+	resolveFull   bool                    // the next resolve must run the full ladder (user-asked)
+	reResolve     bool                    // the in-flight attempt was cancelled to re-resolve
+	pending       bool                    // a hotkey/test is waiting for a link to dictate over
+	pendingTest   bool                    // the pending dictation is the 5 s "Test dictation"
+	resolveKick   chan struct{}           // buffered(1): wake the connect loop for an immediate resolve
 	dictating     bool                    // a hotkey-initiated session is live
 	busy          bool                    // the phone is taken by another capture (link is healthy)
 	phoneState    core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
@@ -78,18 +82,26 @@ type app struct {
 	escWatcher  *winplat.HotkeyWatcher
 	pill        pillView
 
+	// History store for local dictation transcripts.
+	history *HistoryStore
+
 	// Control panel (Chunk 4d). panelOnce guards creation; panelMu guards the window, the view,
 	// the last rendered layout (for hit-testing) and the drag/position state.
-	panelOnce     sync.Once
-	panelMu       sync.Mutex
-	panelWin      *winplat.Overlay
-	panelContent  panelView
-	panelLayout   render.Panel
-	panelPos      [2]int
-	panelPlaced   bool
-	panelDragging bool
-	panelDragX    int
-	panelDragY    int
+	panelOnce          sync.Once
+	panelMu            sync.Mutex
+	panelWin           *winplat.Overlay
+	panelContent       panelView
+	panelLayout        render.Panel
+	panelPos           [2]int
+	panelPlaced        bool
+	panelUserMoved     bool
+	panelLastH         int
+	panelDragging      bool
+	panelDragX         int
+	panelDragY         int
+	accentDropdownOpen bool
+	panelActiveTab     int
+	panelCopiedID      string
 
 	// Panel footer telemetry, guarded by mu.
 	lastAsrMs     int64
@@ -122,9 +134,25 @@ func (a *app) onReady() {
 	a.startupOn = a.startupEnabled()
 	a.mu.Unlock()
 
+	histPath := ""
+	if a.opts.SettingsPath != "" {
+		histPath = filepath.Join(filepath.Dir(a.opts.SettingsPath), "history.json")
+	} else if dir, err := core.DataDir(); err == nil {
+		histPath = filepath.Join(dir, "history.json")
+	}
+	a.history = NewHistoryStore(histPath)
+
+	a.resolveKick = make(chan struct{}, 1)
 	a.buildMenu(paired)
 	a.setState(StateOffline, "starting")
 	a.logf("tray ready; paired=%v", paired)
+	if paired {
+		// The first connect runs the full ladder once to learn the phone's address. After that the
+		// background only retries the remembered address, and the full ladder is user-asked.
+		a.mu.Lock()
+		a.resolveFull = true
+		a.mu.Unlock()
+	}
 	go a.connect()
 }
 
@@ -196,11 +224,18 @@ func (a *app) setState(s TrayState, detail string) {
 		a.mu.Unlock()
 	}
 
-	systray.SetIcon(trayIcon(s))
-	systray.SetTooltip("Sovereign — " + statusTitle(s, detail))
-	if a.mStatus != nil {
-		a.mStatus.SetTitle(statusTitle(s, detail))
+	if s == StateReady && detail == "" {
+		detail = a.serverName()
 	}
+
+	title := statusTitle(s, detail)
+	systray.SetIcon(trayIcon(s))
+	systray.SetTooltip("Sovereign — " + title)
+	if a.mStatus != nil {
+		a.mStatus.SetTitle(title)
+	}
+	a.setPanelStatus(title)
+
 	if a.mTest != nil {
 		if s == StateReady || s == StateBusy {
 			a.mTest.Enable()
@@ -219,20 +254,17 @@ func (a *app) setState(s TrayState, detail string) {
 	}
 }
 
-// hotkeysLive reports whether the tray state should have the dictation hotkey armed. StateBusy must
-// keep it armed: the phone being taken is a refusal, not a transport failure, and nothing else
-// re-arms the watcher until a reconnect.
+// hotkeysLive reports whether the tray state should have the dictation hotkey armed. The hotkey
+// stays armed across states so pressing the hotkey when offline or busy displays immediate visual
+// error feedback on the pill rather than dead input.
 func hotkeysLive(s TrayState) bool {
-	switch s {
-	case StateReady, StateDictating, StateBusy:
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 // connect resolves the phone and runs the client until the link dies fatally or the app exits.
-// Only one connect goroutine runs at a time.
+// Only one connect goroutine runs at a time. Discovery is on demand: a background retry only probes
+// the remembered address (cheap and silent), while the full ladder — remembered address, short
+// mDNS, then the subnet sweep — runs at startup and whenever a hotkey asks for a link.
 func (a *app) connect() {
 	a.mu.Lock()
 	if a.connecting || !a.paired {
@@ -250,21 +282,38 @@ func (a *app) connect() {
 		a.connecting = false
 		a.client = nil
 		a.connCancel = nil
+		a.attemptCancel = nil
 		a.mu.Unlock()
 	}()
 
 	for cctx.Err() == nil {
-		target, pin, err := a.resolve(cctx)
+		a.mu.Lock()
+		full := a.resolveFull
+		a.resolveFull = false
+		hint := a.settings.LastAddr
+		a.mu.Unlock()
+
+		target, pin, err := a.resolve(cctx, hint, full)
 		if err != nil {
-			// No phone yet (or discovery is flaky): keep trying, so starting the tray before the
-			// phone server is not a dead end.
-			a.setState(StateError, "searching for the phone")
+			if cctx.Err() != nil {
+				return
+			}
 			a.logf("discovery failed: %v", err)
-			if !sleepCtx(cctx, 3*time.Second) {
+			if full {
+				// A user asked for this resolve; report where they are looking rather than hiding
+				// the failure in the tray.
+				a.setState(StateError, "no phone found")
+				a.failPendingDictation("No phone found — is the phone on this network?")
+			} else {
+				a.setState(StateOffline, "searching for the phone")
+			}
+			if !a.waitRetry(cctx) {
 				return
 			}
 			continue
 		}
+
+		a.setLastAddr(target)
 
 		client := core.NewClient(core.ClientConfig{
 			Addr:     target,
@@ -274,14 +323,28 @@ func (a *app) connect() {
 			Handlers: a.handlers(),
 			Logf:     a.logf,
 		})
+		actx, acancel := context.WithCancel(cctx)
 		a.mu.Lock()
 		a.client = client
+		a.attemptCancel = acancel
 		a.mu.Unlock()
 
 		a.logf("connecting to wss://%s%s", target, core.Path)
-		err = client.Run(cctx)
+		err = client.Run(actx)
+
+		a.mu.Lock()
+		a.client = nil
+		a.attemptCancel = nil
+		re := a.reResolve
+		a.reResolve = false
+		a.mu.Unlock()
 		if cctx.Err() != nil {
 			return
+		}
+		if re {
+			// A hotkey asked for a fresh resolve: keep its deferred dictation pending and run the
+			// ladder again from the top.
+			continue
 		}
 
 		// Run reconnects internally, so returning means a fatal condition: a rejected identity or
@@ -291,19 +354,24 @@ func (a *app) connect() {
 		case errors.As(err, &ae):
 			a.setState(StateError, "re-pair required")
 			a.logf("authentication failed: %v", err)
+			a.failPendingDictation("Re-pair required — the phone no longer recognises this desktop")
 		case errors.Is(err, core.ErrPinMismatch):
 			a.setState(StateError, "certificate pin mismatch")
 			a.logf("pin mismatch: %v", err)
+			a.failPendingDictation("Certificate pin mismatch — possible impersonation")
 		default:
 			a.setState(StateError, errString(err))
 			a.logf("link ended: %v", err)
+			a.failPendingDictation("Phone connection ended")
 		}
 		return
 	}
 }
 
-// resolve returns the address and pin to dial: the manual override when set, else discovery.
-func (a *app) resolve(ctx context.Context) (addr, pin string, err error) {
+// resolve returns the address and pin to dial: the manual override when set, else the discovery
+// ladder. full selects the whole ladder (remembered address → short mDNS → subnet sweep); without
+// it only the cheap remembered-address probe runs, so an idle client never multicasts or sweeps.
+func (a *app) resolve(ctx context.Context, hint string, full bool) (addr, pin string, err error) {
 	creds := a.credsSnapshot()
 	if a.opts.Addr != "" {
 		pin = a.opts.Pin
@@ -312,7 +380,15 @@ func (a *app) resolve(ctx context.Context) (addr, pin string, err error) {
 		}
 		return a.opts.Addr, pin, nil
 	}
-	peer, err := core.Discover(ctx, a.opts.DiscoverTimeout)
+
+	var peer core.Peer
+	if full {
+		peer, err = core.Resolve(ctx, core.ResolveOptions{Hint: hint, Logf: a.logf})
+	} else if hint != "" && core.Reachable(ctx, hint) {
+		peer = core.Peer{Addr: hint, Port: core.DefaultPort, Via: core.ViaHint}
+	} else {
+		err = core.ErrNoPeer
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -323,15 +399,137 @@ func (a *app) resolve(ctx context.Context) (addr, pin string, err error) {
 	return peer.Addr, pin, nil
 }
 
+// requestFullResolve asks the connect manager to run the full discovery ladder now. It is called
+// only from the hotkey/test path, never on a timer. If a connect attempt is in flight it is
+// cancelled so the manager re-resolves; otherwise the running backoff wait is woken.
+func (a *app) requestFullResolve() {
+	a.mu.Lock()
+	a.resolveFull = true
+	cancel := a.attemptCancel
+	if cancel != nil {
+		a.reResolve = true
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case a.resolveKick <- struct{}{}:
+	default:
+	}
+}
+
+// waitRetry blocks for the reconnect backoff, or until a hotkey asks for an immediate resolve. It
+// returns false when the manager has been cancelled.
+func (a *app) waitRetry(ctx context.Context) bool {
+	t := time.NewTimer(3 * time.Second)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-a.resolveKick:
+		return true
+	case <-t.C:
+		return true
+	}
+}
+
+// setLastAddr remembers the address a successful resolve produced, so the next reconnect (and the
+// next idle retry) can skip mDNS and the sweep.
+func (a *app) setLastAddr(addr string) {
+	a.mu.Lock()
+	if a.settings.LastAddr == addr {
+		a.mu.Unlock()
+		return
+	}
+	a.settings.LastAddr = addr
+	s := a.settings
+	a.mu.Unlock()
+	a.logf("remembered phone address %s", addr)
+	a.persist(s)
+}
+
+// beginOnDemandDictation shows the pill immediately and asks the connect manager for a link, so a
+// hotkey press never looks dead while the discovery ladder runs. It is called when a dictation is
+// requested but no authenticated link is up.
+func (a *app) beginOnDemandDictation() {
+	a.mu.Lock()
+	a.pending = true
+	connecting := a.connecting
+	a.mu.Unlock()
+
+	a.showConnectingPill("Connecting…") // respond before any discovery happens
+
+	a.requestFullResolve()
+	if !connecting {
+		go a.connect()
+	}
+}
+
+// startPendingDictation runs the dictation a hotkey (or the 5 s test) deferred until the link came
+// up. It is called from OnConn the moment the client reports Ready.
+func (a *app) startPendingDictation() {
+	a.mu.Lock()
+	pending := a.pending
+	a.pending = false
+	test := a.pendingTest
+	a.pendingTest = false
+	c := a.client
+	busy := a.busy
+	phone := a.phoneState
+	a.mu.Unlock()
+	if !pending || c == nil {
+		return
+	}
+	if busy {
+		a.showErrorPill(busyMessage(phone.HolderName))
+		a.signalSmartReset()
+		return
+	}
+	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
+		a.logf("dictation start failed: %v", err)
+		a.showErrorPill("Dictation start failed")
+		a.signalSmartReset()
+		return
+	}
+	if test {
+		a.scheduleTestStop()
+	}
+}
+
+// failPendingDictation ends a deferred dictation (a hotkey/test waiting for a link) with a visible
+// error, so a failed connect is never silent.
+func (a *app) failPendingDictation(msg string) {
+	a.mu.Lock()
+	pending := a.pending
+	a.pending = false
+	a.pendingTest = false
+	a.mu.Unlock()
+	if pending {
+		a.showErrorPill(msg)
+		a.signalSmartReset()
+	}
+}
+
 func (a *app) handlers() core.Handlers {
 	return core.Handlers{
 		OnConn: func(st core.ConnState, detail string) {
+			a.mu.Lock()
+			a.connState = st
+			pending := a.pending
+			a.mu.Unlock()
 			a.setState(mapConnState(st), detail)
 			a.setPanelStatus(statusTitle(mapConnState(st), detail))
 			if st != core.StateReady {
-				a.hidePill() // a dropped or unauthenticated link takes the pill down with it
-				a.signalSmartReset()
+				// Keep the connecting pill up while a hotkey's deferred dictation still waits for
+				// the link; a dropped link otherwise takes the pill down with it.
+				if !pending {
+					a.hidePill()
+					a.signalSmartReset()
+				}
+				return
 			}
+			a.startPendingDictation()
 		},
 		OnStarted: func(sessionID string) {
 			a.setDictating(true)
@@ -343,7 +541,7 @@ func (a *app) handlers() core.Handlers {
 			if st == core.StateIdle {
 				a.setDictating(false)
 				a.setState(StateReady, "")
-				a.hidePill()
+				a.hideListeningPill()
 				a.signalSmartReset()
 			} else {
 				a.setState(StateDictating, strings.ToLower(st))
@@ -351,6 +549,10 @@ func (a *app) handlers() core.Handlers {
 			}
 		},
 		OnBusy: func(holder string, takeover bool) {
+			a.mu.Lock()
+			a.pending = false
+			a.pendingTest = false
+			a.mu.Unlock()
 			a.setDictating(false)
 			// A refusal is not a link failure: mark the phone taken (the hotkey stays armed) and
 			// show it where the user is looking, the way the phone's own pill marks a refused tap.
@@ -376,22 +578,43 @@ func (a *app) handlers() core.Handlers {
 		OnUtterance: func(sessionID, delivery, raw, reason string) {
 			a.setDictating(false)
 			a.setState(StateReady, "")
-			a.hidePill()
 			a.signalSmartReset()
 			a.logf("utterance done (%s): %q", reason, delivery)
 			if reason == core.DoneFinal && delivery != "" {
+				a.mu.Lock()
+				asr, cleanup := a.lastAsrMs, a.lastCleanupMs
+				a.mu.Unlock()
+				var words int
+				if a.history != nil {
+					it := a.history.Add(delivery, raw, asr, cleanup)
+					words = it.Words
+				} else {
+					words = countWords(delivery)
+				}
+				a.refreshPanel()
 				a.inject(delivery)
+				a.showInsertedPill(words, delivery)
+			} else {
+				a.hidePill()
 			}
 		},
 		OnReleased: func(sessionID, reason string) {
 			a.setDictating(false)
 			a.setState(StateReady, "")
-			a.hidePill()
+			if reason == core.ReleaseCancelled {
+				a.hidePill()
+			} else {
+				a.hideListeningPill()
+			}
 			a.signalSmartReset()
 		},
 		OnError: func(code, msg string, fatal bool) {
 			a.logf("phone error: %s: %s (fatal=%v)", code, msg, fatal)
 			if fatal {
+				a.mu.Lock()
+				a.pending = false
+				a.pendingTest = false
+				a.mu.Unlock()
 				a.setDictating(false)
 				a.setState(StateError, code)
 				a.setPanelStatus(code)
@@ -428,8 +651,14 @@ func pillStatus(state string) string {
 func (a *app) testDictation() {
 	a.mu.Lock()
 	c := a.client
+	ready := a.connState == core.StateReady
 	a.mu.Unlock()
-	if c == nil {
+
+	if c == nil || !ready {
+		a.mu.Lock()
+		a.pendingTest = true
+		a.mu.Unlock()
+		a.beginOnDemandDictation()
 		return
 	}
 	a.captureTarget()
@@ -437,6 +666,11 @@ func (a *app) testDictation() {
 		a.logf("test dictation start: %v", err)
 		return
 	}
+	a.scheduleTestStop()
+}
+
+// scheduleTestStop ends the 5 s "Test dictation" once its session is running.
+func (a *app) scheduleTestStop() {
 	time.AfterFunc(5*time.Second, func() {
 		a.mu.Lock()
 		c := a.client
@@ -630,15 +864,37 @@ func (a *app) toggleDictation() {
 
 func (a *app) startDictation() {
 	a.mu.Lock()
+	paired := a.paired
 	c := a.client
+	busy := a.busy
+	phone := a.phoneState
+	ready := a.connState == core.StateReady
 	a.mu.Unlock()
-	if c == nil {
+
+	if !paired {
+		a.showErrorPill("No phone paired — open Sovereign to pair")
 		a.signalSmartReset()
 		return
 	}
+	if busy {
+		a.showErrorPill(busyMessage(phone.HolderName))
+		a.signalSmartReset()
+		return
+	}
+
+	// Capture the target window while the user's editor still holds focus. The pill is
+	// non-activating, so focus is preserved while the discovery ladder runs.
 	a.captureTarget()
+
+	if c == nil || !ready {
+		// Connect on demand: the pill appears now, and the session starts as soon as the link is up.
+		a.beginOnDemandDictation()
+		return
+	}
+
 	if err := c.StartDictation(a.ctx, core.ModeHold); err != nil {
 		a.logf("dictation start failed: %v", err)
+		a.showErrorPill("Dictation start failed")
 		a.signalSmartReset()
 	}
 }
@@ -646,7 +902,18 @@ func (a *app) startDictation() {
 func (a *app) stopDictation() {
 	a.mu.Lock()
 	c := a.client
+	pending := a.pending
+	if pending {
+		a.pending = false
+		a.pendingTest = false
+	}
 	a.mu.Unlock()
+	if pending && c == nil {
+		// Released before the link came up: abandon the deferred dictation rather than start one
+		// the user is no longer holding.
+		a.hidePill()
+		return
+	}
 	if c == nil {
 		return
 	}
@@ -776,7 +1043,7 @@ func (a *app) doPair() {
 	a.setState(StateConnecting, "pairing")
 	target := a.opts.Addr
 	if target == "" {
-		peer, err := core.Discover(a.ctx, a.opts.DiscoverTimeout)
+		peer, err := core.Discover(a.ctx, core.MDNSTimeout)
 		if err != nil {
 			a.setState(StateError, "no phone found")
 			a.mPair.Enable()
@@ -818,6 +1085,9 @@ func (a *app) doPair() {
 	a.setState(StateReady, "paired with "+creds.ServerName)
 	a.refreshPanel()
 	a.logf("paired with %q", creds.ServerName)
+	a.mu.Lock()
+	a.resolveFull = true
+	a.mu.Unlock()
 	go a.connect()
 }
 
@@ -881,6 +1151,50 @@ func (a *app) setPosition(p string) {
 	a.refreshPanel()
 }
 
+func (a *app) setThemeMode(m string) {
+	a.mu.Lock()
+	a.settings.ThemeMode = m
+	s := a.settings
+	a.mu.Unlock()
+	a.persist(s)
+	a.refreshPanel()
+	a.repaintPill()
+}
+
+func (a *app) setThemePreset(p string) {
+	a.mu.Lock()
+	a.settings.ThemePreset = p
+	s := a.settings
+	a.mu.Unlock()
+	a.persist(s)
+	a.refreshPanel()
+	a.repaintPill()
+}
+
+func (a *app) themePreset() string {
+	a.mu.Lock()
+	p := a.settings.ThemePreset
+	a.mu.Unlock()
+	if p == "" {
+		return DefaultThemePreset
+	}
+	return p
+}
+
+func (a *app) isDarkTheme() bool {
+	a.mu.Lock()
+	mode := a.settings.ThemeMode
+	a.mu.Unlock()
+	switch mode {
+	case ThemeDark:
+		return true
+	case ThemeLight:
+		return false
+	default:
+		return winplat.IsSystemDarkTheme()
+	}
+}
+
 func (a *app) toggleStartup() {
 	enable := !a.startupEnabled()
 	if err := winplat.SetAutostart(a.exePath, enable); err != nil {
@@ -921,6 +1235,12 @@ func (a *app) credsSnapshot() core.Credentials {
 	return a.creds
 }
 
+func (a *app) serverName() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.creds.ServerName
+}
+
 // mapConnState maps the transport state to the tray state; the detail string carries the reason.
 func mapConnState(st core.ConnState) TrayState {
 	switch st {
@@ -940,17 +1260,6 @@ func statusTitle(s TrayState, detail string) string {
 		return stateLabel(s) + " — " + detail
 	}
 	return stateLabel(s)
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }
 
 func errString(err error) string {

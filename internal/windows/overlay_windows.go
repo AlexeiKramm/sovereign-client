@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // Overlay is a hand-drawn Win32 layered window. In its default (pill) mode it is transparent,
@@ -278,7 +279,7 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 	case wmOverlayApply:
 		o.apply()
 		return 0
-	case wmDisplayChange, wmDpiChanged:
+	case wmDisplayChange, wmDpiChanged, wmSettingChange:
 		if o.onDisplayChange != nil {
 			o.onDisplayChange()
 		}
@@ -301,9 +302,8 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		// The pill: belt and braces alongside WS_EX_TRANSPARENT.
 		return ^uintptr(0) // HTTRANSPARENT (-1)
 	case wmMouseActivate:
-		if o.interactive {
-			return maActivate // the panel is meant to be clicked into
-		}
+		// Return maNoActivate so Windows does not eat the mouse click upon activation from
+		// another window. The panel activates itself on MouseDown so the first click registers.
 		return maNoActivate
 	case wmMouseMove, wmLButtonDown, wmLButtonUp:
 		if o.interactive && o.onMouse != nil {
@@ -312,6 +312,7 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 			// when the cursor leaves the (small) window.
 			switch kind {
 			case MouseDown:
+				procSetForegroundWindow.Call(hwnd)
 				procSetCapture.Call(hwnd)
 			case MouseUp:
 				procReleaseCapture.Call()
@@ -570,12 +571,13 @@ const (
 	wmDisplayChange = 0x007E
 	wmNCHitTest     = 0x0084
 	wmDpiChanged    = 0x02E0
+	wmSettingChange = 0x001A
 
 	wmApp          = 0x8000
 	wmOverlayApply = wmApp + 1
 	wmOverlayQuit  = wmApp + 2
 
-	maActivate   = 2
+	maActivate   = 1 // MA_ACTIVATE: activates window without discarding click
 	maNoActivate = 3
 	htClient     = 1
 
@@ -687,3 +689,19 @@ var (
 	procDeleteObject       = gdi32.NewProc("DeleteObject")
 	procDeleteDC           = gdi32.NewProc("DeleteDC")
 )
+
+// IsSystemDarkTheme checks the Windows personalization settings in the registry to determine
+// whether the system is currently using Dark Mode (AppsUseLightTheme == 0).
+func IsSystemDarkTheme() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return true // default to dark if key does not exist or cannot be read
+	}
+	defer k.Close()
+
+	val, _, err := k.GetIntegerValue("AppsUseLightTheme")
+	if err != nil {
+		return true
+	}
+	return val == 0
+}

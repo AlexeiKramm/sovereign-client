@@ -11,7 +11,7 @@ import (
 )
 
 // SingleInstanceMutexName is the named mutex that enforces one tray instance per user session.
-const SingleInstanceMutexName = `Local\SovereignDesktop.SingleInstance`
+const SingleInstanceMutexName = `Local\SovereignClient.SingleInstance`
 
 var (
 	kernel32         = windows.NewLazySystemDLL("kernel32.dll")

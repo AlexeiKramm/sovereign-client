@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,12 +182,29 @@ func (c *Client) CancelDictation(ctx context.Context) error {
 	return c.writeTo(ctx, "CANCEL_DICTATION", &CancelDictationPayload{SessionID: id})
 }
 
+// WebSocketURL constructs a "wss://" URL from a host:port address and a path, properly
+// escaping IPv6 zone identifiers (RFC 6874) so that url.Parse does not fail on zone indices
+// like "%Ethernet 4" or "%Wi-Fi".
+func WebSocketURL(addr, path string) string {
+	idx := strings.Index(addr, "%")
+	if idx < 0 {
+		return "wss://" + addr + path
+	}
+	end := strings.Index(addr, "]")
+	if end < 0 || idx >= end {
+		return "wss://" + addr + path
+	}
+	zone := addr[idx+1 : end]
+	escapedZone := url.QueryEscape(zone)
+	return "wss://" + addr[:idx] + "%25" + escapedZone + addr[end:] + path
+}
+
 func (c *Client) connect(ctx context.Context) (*liveConn, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
 	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: c.tlsCfg}}
-	url := "wss://" + c.cfg.Addr + Path
+	url := WebSocketURL(c.cfg.Addr, Path)
 	ws, _, err := websocket.Dial(dialCtx, url, &websocket.DialOptions{HTTPClient: httpClient})
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", url, err)

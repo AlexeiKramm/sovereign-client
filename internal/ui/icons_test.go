@@ -115,3 +115,16 @@ func TestStateColorsAreDistinct(t *testing.T) {
 		seen[key] = s
 	}
 }
+
+func TestTrayIconContainsSovereignMark(t *testing.T) {
+	for _, st := range []TrayState{StateReady, StateDictating, StateOffline} {
+		ico := trayIcon(st)
+		entries := parseICO(t, ico)
+		if len(entries) != 2 {
+			t.Fatalf("trayIcon state %v: got %d entries, want 2", st, len(entries))
+		}
+		if entries[0].w != 16 || entries[1].w != 32 {
+			t.Errorf("trayIcon sizes: %dx%d and %dx%d, want 16 and 32", entries[0].w, entries[0].w, entries[1].w, entries[1].w)
+		}
+	}
+}

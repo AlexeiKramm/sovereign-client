@@ -2,6 +2,9 @@ package render
 
 import (
 	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -57,17 +60,17 @@ func TestRenderPanelLayout(t *testing.T) {
 	}
 }
 
-// TestRenderPanelTallerWithInfo checks the footer grows the panel only when there are info lines.
-func TestRenderPanelTallerWithInfo(t *testing.T) {
+// TestRenderPanelTallerWithVersion checks the footer is present only when Version is set.
+func TestRenderPanelTallerWithVersion(t *testing.T) {
 	base, err := RenderPanel(PanelModel{Title: "Sovereign", Status: "Ready", Scale: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	more, err := RenderPanel(PanelModel{
-		Title:  "Sovereign",
-		Status: "Ready",
-		Info:   []string{"Last ASR 1 ms", "Link rtt=2ms", "Sessions 3"},
-		Scale:  1,
+		Title:   "Sovereign",
+		Status:  "Ready",
+		Version: "v0.9.4",
+		Scale:   1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +78,7 @@ func TestRenderPanelTallerWithInfo(t *testing.T) {
 	_, bh := base.Frame.Size()
 	_, mh := more.Frame.Size()
 	if mh <= bh {
-		t.Fatalf("info lines did not grow the panel: %d vs %d", bh, mh)
+		t.Fatalf("version footer did not grow the panel: %d vs %d", bh, mh)
 	}
 }
 
@@ -94,8 +97,9 @@ func TestPanelControlAtEmpty(t *testing.T) {
 // its id, at the rect it was drawn at.
 func TestRenderPanelRowsControls(t *testing.T) {
 	p, err := RenderPanel(PanelModel{
-		Title:  "Sovereign",
-		Status: "Ready",
+		Title:     "Sovereign",
+		Status:    "Ready",
+		ActiveTab: TabSettings,
 		Rows: []Row{
 			{Kind: RowChips, Text: "Mode", Options: []Option{
 				{ID: "mode:auto", Text: "Auto", On: true},
@@ -109,7 +113,7 @@ func TestRenderPanelRowsControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderPanel: %v", err)
 	}
-	want := []string{"close", "mode:auto", "mode:hold", "startup", "quit"}
+	want := []string{"close", "tab:dictations", "tab:settings", "mode:auto", "mode:hold", "startup", "quit"}
 	for _, id := range want {
 		c, ok := controlByID(p, id)
 		if !ok {
@@ -139,4 +143,223 @@ func controlIDs(p Panel) []string {
 		out = append(out, c.ID)
 	}
 	return out
+}
+
+func TestRenderPanelDropdown(t *testing.T) {
+	opts := []Option{
+		{ID: "preset:cyan", Text: "Cyan", On: true},
+		{ID: "preset:sky", Text: "Sky"},
+	}
+	// Collapsed
+	pClosed, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		ActiveTab: TabSettings,
+		Rows: []Row{
+			{Kind: RowDropdown, ID: "dropdown:accent", Text: "Accent color", Detail: "Cyan", Options: opts, On: false},
+		},
+		Scale: 1,
+	})
+	if err != nil {
+		t.Fatalf("RenderPanel collapsed: %v", err)
+	}
+	if _, ok := controlByID(pClosed, "dropdown:accent"); !ok {
+		t.Fatal("missing dropdown trigger control when collapsed")
+	}
+	if _, ok := controlByID(pClosed, "preset:sky"); ok {
+		t.Fatal("option should not be present when dropdown is collapsed")
+	}
+
+	// Expanded
+	pOpen, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		ActiveTab: TabSettings,
+		Rows: []Row{
+			{Kind: RowDropdown, ID: "dropdown:accent", Text: "Accent color", Detail: "Cyan", Options: opts, On: true},
+		},
+		Scale: 1,
+	})
+	if err != nil {
+		t.Fatalf("RenderPanel expanded: %v", err)
+	}
+	if _, ok := controlByID(pOpen, "dropdown:accent"); !ok {
+		t.Fatal("missing dropdown trigger control when expanded")
+	}
+	if _, ok := controlByID(pOpen, "preset:sky"); !ok {
+		t.Fatal("missing option control when expanded")
+	}
+	_, hClosed := pClosed.Frame.Size()
+	_, hOpen := pOpen.Frame.Size()
+	if hOpen <= hClosed {
+		t.Fatalf("expanded height %d should be greater than collapsed %d", hOpen, hClosed)
+	}
+}
+
+func TestExportPanelPNG(t *testing.T) {
+	presetOpts := make([]Option, len(Presets))
+	for i, p := range Presets {
+		presetOpts[i] = Option{ID: "preset:" + p.ID, Text: p.Name, On: p.ID == "cyan"}
+	}
+	settingsRows := []Row{
+		{Kind: RowChips, Text: "Dictation mode", Options: []Option{
+			{ID: "mode:auto", Text: "Tap or hold", On: true},
+			{ID: "mode:hold", Text: "Hold to talk"},
+			{ID: "mode:toggle", Text: "Press to toggle"},
+		}},
+		{Kind: RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: "Ctrl+Alt+Space"},
+		{Kind: RowChips, Text: "Insertion", Options: []Option{
+			{ID: "insertion:paste", Text: "Paste (fast)", On: true},
+			{ID: "insertion:type", Text: "Type"},
+		}},
+		{Kind: RowChips, Text: "Overlay position", Options: []Option{
+			{ID: "position:bottom-right", Text: "Bottom right", On: true},
+			{ID: "position:bottom-left", Text: "Bottom left"},
+			{ID: "position:top-right", Text: "Top right"},
+			{ID: "position:top-left", Text: "Top left"},
+		}},
+		{Kind: RowChips, Text: "Theme", Options: []Option{
+			{ID: "theme:system", Text: "System", On: true},
+			{ID: "theme:dark", Text: "Dark"},
+			{ID: "theme:light", Text: "Light"},
+		}},
+		{Kind: RowChips, Text: "Feedback pill duration", Options: []Option{
+			{ID: "feedback:1", Text: "1s"},
+			{ID: "feedback:2", Text: "2s", On: true},
+			{ID: "feedback:3", Text: "3s"},
+			{ID: "feedback:0", Text: "Off"},
+		}},
+		{Kind: RowDropdown, ID: "dropdown:accent", Text: "Accent color", Detail: "Cyan", Options: presetOpts, On: false},
+		{Kind: RowToggle, ID: "startup", Text: "Start with Windows", On: true},
+		{Kind: RowButton, ID: "unpair", Text: "Unpair…", Detail: "Phone"},
+		{Kind: RowButton, ID: "quit", Text: "Quit Sovereign"},
+	}
+
+	sampleHistory := []PanelHistoryItem{
+		{
+			ID:        "item-1",
+			TimeAgo:   "Just now",
+			CleanText: "The quick brown fox jumps over the lazy dog and tests our new speech dictation formatting.",
+			RawText:   "the quick brown fox jumps over the lazy dog and tests our new speech dictation formatting",
+			Words:     15,
+			AsrMs:     280,
+			CleanupMs: 140,
+			ViewMode:  "clean",
+		},
+		{
+			ID:        "item-2",
+			TimeAgo:   "5 mins ago",
+			CleanText: "Send an update to the design team regarding the Material 3 tonal palettes and high contrast cards.",
+			RawText:   "send an update to the design team regarding the material three tonal palettes",
+			Words:     18,
+			AsrMs:     310,
+			CleanupMs: 155,
+			ViewMode:  "clean",
+		},
+	}
+
+	// 1. Dictations Tab (Dark)
+	pHistDark, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		Status:    "Ready — Phone",
+		ActiveTab: TabDictations,
+		History:   sampleHistory,
+		Rows:      settingsRows,
+		Version:   "v0.9.4",
+		Dark:      true,
+		Scale:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Dictations Tab (Light)
+	pHistLight, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		Status:    "Ready — Phone",
+		ActiveTab: TabDictations,
+		History:   sampleHistory,
+		Rows:      settingsRows,
+		Version:   "v0.9.4",
+		Dark:      false,
+		Scale:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Settings Tab (Dark)
+	pSettings, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		Status:    "Ready — Phone",
+		ActiveTab: TabSettings,
+		History:   sampleHistory,
+		Rows:      settingsRows,
+		Version:   "v0.9.4",
+		Dark:      true,
+		Scale:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Settings with Dropdown Open
+	openRows := make([]Row, len(settingsRows))
+	copy(openRows, settingsRows)
+	openRows[6].On = true
+	pSettingsOpen, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		Status:    "Ready — Phone",
+		ActiveTab: TabSettings,
+		History:   sampleHistory,
+		Rows:      openRows,
+		Version:   "v0.9.4",
+		Dark:      true,
+		Scale:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Pill Overlays: Listening, Inserted Feedback, Error Feedback
+	pillListening, _ := Render(Model{
+		Status:      "Listening…",
+		Provisional: "testing live dictation transcript",
+		Dark:        true,
+		Scale:       1,
+	})
+	pillInserted, _ := Render(Model{
+		Committed:     "testing live dictation transcript",
+		InsertedWords: 18,
+		Dark:          true,
+		Scale:         1,
+	})
+	pillError, _ := Render(Model{
+		Status: "Phone offline — start server in Sovereign app",
+		Error:  true,
+		Dark:   true,
+		Scale:  1,
+	})
+
+	exports := map[string]image.Image{
+		"panel_preview.png":          pHistDark.Frame.Img,
+		"panel_preview_light.png":    pHistLight.Frame.Img,
+		"panel_settings.png":         pSettings.Frame.Img,
+		"panel_preview_open.png":     pSettingsOpen.Frame.Img,
+		"pill_listening_preview.png": pillListening.Img,
+		"pill_inserted_preview.png":  pillInserted.Img,
+		"pill_error_preview.png":     pillError.Img,
+	}
+
+	for name, img := range exports {
+		f, err := os.Create(filepath.Join(t.TempDir(), name))
+		if err == nil {
+			_ = png.Encode(f, img)
+			f.Close()
+		}
+		if outDir := os.Getenv("SOVEREIGN_EXPORT_DIR"); outDir != "" {
+			if outF, err := os.Create(filepath.Join(outDir, name)); err == nil {
+				_ = png.Encode(outF, img)
+				outF.Close()
+			}
+		}
+	}
 }

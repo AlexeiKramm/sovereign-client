@@ -97,7 +97,7 @@ func IdentifySovereign(ctx context.Context, addr string) bool {
 	defer cancel()
 
 	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: TLSConfig("", nil)}}
-	ws, _, err := websocket.Dial(ctx, "wss://"+addr+Path, &websocket.DialOptions{HTTPClient: httpClient})
+	ws, _, err := websocket.Dial(ctx, WebSocketURL(addr, Path), &websocket.DialOptions{HTTPClient: httpClient})
 	if err != nil {
 		return false
 	}
@@ -120,25 +120,12 @@ func IdentifySovereign(ctx context.Context, addr string) bool {
 	return false
 }
 
-// Discover finds the phone: mDNS first (standard, cheap, and does no scanning), then a unicast TCP
-// probe of the local subnets confirmed by IdentifySovereign. The probe exists because mDNS
-// multicast is routinely blocked between a wired host and a Wi-Fi phone (AP isolation / IGMP
-// snooping) and is misrouted when a VPN is the phone's default network — both cases PROTOCOL.md §2
-// names, and both of which make mDNS a dead end on their own.
+// Discover finds the phone with no remembered address: mDNS first (standard, cheap, and does no
+// scanning), then a unicast TCP probe of the local subnets confirmed by IdentifySovereign. The
+// probe exists because mDNS multicast is routinely blocked between a wired host and a Wi-Fi phone
+// (AP isolation / IGMP snooping) and is misrouted when a VPN is the phone's default network — both
+// cases PROTOCOL.md §2 names, and both of which make mDNS a dead end on their own. It is Resolve's
+// ladder minus the hint rung, kept for the headless `-discover` path.
 func Discover(ctx context.Context, timeout time.Duration) (Peer, error) {
-	if p, err := Browse(ctx, timeout); err == nil {
-		return p, nil
-	} else if ctx.Err() != nil {
-		return Peer{}, ctx.Err()
-	}
-
-	for _, addr := range ProbePort(ctx, LocalProbeHosts(), DefaultPort, probePerHostTimeout) {
-		if ctx.Err() != nil {
-			return Peer{}, ctx.Err()
-		}
-		if IdentifySovereign(ctx, addr) {
-			return Peer{Addr: addr, Port: DefaultPort, Via: ViaProbe}, nil
-		}
-	}
-	return Peer{}, ErrNoPeer
+	return Resolve(ctx, ResolveOptions{MDNSTimeout: timeout})
 }

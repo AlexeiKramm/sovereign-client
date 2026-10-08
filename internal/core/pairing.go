@@ -54,7 +54,7 @@ func Pair(ctx context.Context, opts PairOptions) (Credentials, error) {
 	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: TLSConfig("", func(fp string) {
 		observed = fp
 	})}}
-	url := "wss://" + opts.Addr + Path
+	url := WebSocketURL(opts.Addr, Path)
 	ws, _, err := websocket.Dial(pctx, url, &websocket.DialOptions{HTTPClient: httpClient})
 	if err != nil {
 		return Credentials{}, fmt.Errorf("dial %s: %w", url, err)
