@@ -89,6 +89,38 @@ func TestRenderProvisionalDiffersFromCommitted(t *testing.T) {
 	}
 }
 
+func TestRenderProcessingShowsCyclingDots(t *testing.T) {
+	listen, err := Render(Model{Status: "Listening…", Dark: true, Scale: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc, err := Render(Model{Status: "Finishing…", Processing: true, Dark: true, Scale: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pixelsEqual(listen.Img, proc.Img) {
+		t.Fatal("processing state rendered identically to listening")
+	}
+
+	// The mark must change with DotPhase, or the overlay's timer would draw a static picture.
+	p0, err := Render(Model{Processing: true, DotPhase: 0, Dark: true, Scale: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := Render(Model{Processing: true, DotPhase: 1, Dark: true, Scale: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pixelsEqual(p0.Img, p1.Img) {
+		t.Fatal("processing mark did not change with DotPhase")
+	}
+
+	// An empty Status defaults to "Finishing…" while processing, so these must be identical.
+	if !pixelsEqual(proc.Img, p0.Img) {
+		t.Fatal("Processing with an empty Status should default to the Finishing… label")
+	}
+}
+
 func TestWrapBreaksAtWidth(t *testing.T) {
 	face, err := newFace(bodyFont)
 	if err != nil {

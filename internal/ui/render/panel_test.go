@@ -400,15 +400,24 @@ func TestExportPanelPNG(t *testing.T) {
 		Dark:   true,
 		Scale:  1,
 	})
+	pillProcessing, _ := Render(Model{
+		Status:     "Finishing…",
+		Committed:  "testing live dictation transcript",
+		Processing: true,
+		DotPhase:   1,
+		Dark:       true,
+		Scale:      1,
+	})
 
 	exports := map[string]image.Image{
-		"panel_preview.png":          pHistDark.Frame.Img,
-		"panel_preview_light.png":    pHistLight.Frame.Img,
-		"panel_settings.png":         pSettings.Frame.Img,
-		"panel_preview_open.png":     pSettingsOpen.Frame.Img,
-		"pill_listening_preview.png": pillListening.Img,
-		"pill_inserted_preview.png":  pillInserted.Img,
-		"pill_error_preview.png":     pillError.Img,
+		"panel_preview.png":           pHistDark.Frame.Img,
+		"panel_preview_light.png":     pHistLight.Frame.Img,
+		"panel_settings.png":          pSettings.Frame.Img,
+		"panel_preview_open.png":      pSettingsOpen.Frame.Img,
+		"pill_listening_preview.png":  pillListening.Img,
+		"pill_inserted_preview.png":   pillInserted.Img,
+		"pill_error_preview.png":      pillError.Img,
+		"pill_processing_preview.png": pillProcessing.Img,
 	}
 
 	for name, img := range exports {

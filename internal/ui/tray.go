@@ -78,6 +78,7 @@ type app struct {
 	overlay     *winplat.Overlay
 	escWatcher  *winplat.HotkeyWatcher
 	pill        pillView
+	procGen     int // bumps per processing episode so a stale dot-timer chain cannot revive
 
 	// History store for local dictation transcripts.
 	history *HistoryStore
@@ -500,12 +501,20 @@ func (a *app) handlers() core.Handlers {
 		},
 		OnState: func(sessionID, st string) {
 			if st == core.StateIdle {
+				a.stopProcessingPill()
 				a.setDictating(false)
 				a.setState(StateReady, "")
 				a.hideListeningPill()
 				a.signalSmartReset()
+				return
+			}
+			a.setState(StateDictating, strings.ToLower(st))
+			if st == core.StateProcessing {
+				// The phone reached its drain. Show the processing mark if the local, instant switch
+				// has not already (e.g. a silence auto-stop the client did not initiate).
+				a.startProcessingPill()
 			} else {
-				a.setState(StateDictating, strings.ToLower(st))
+				a.stopProcessingPill()
 				a.setPillStatus(pillStatus(st))
 			}
 		},
@@ -635,17 +644,8 @@ func (a *app) testDictation() {
 
 // scheduleTestStop ends the 5 s "Test dictation" once its session is running.
 func (a *app) scheduleTestStop() {
-	time.AfterFunc(5*time.Second, func() {
-		a.mu.Lock()
-		c := a.client
-		a.mu.Unlock()
-		if c == nil {
-			return
-		}
-		if err := c.StopDictation(a.ctx); err != nil {
-			a.logf("test dictation stop: %v", err)
-		}
-	})
+	// Route through stopDictation so the test shows the same instant processing feedback.
+	time.AfterFunc(5*time.Second, a.stopDictation)
 }
 
 // captureTarget records the window that should receive the finished text. It is called just before
@@ -886,8 +886,12 @@ func (a *app) stopDictation() {
 	if c == nil {
 		return
 	}
+	// Respond to the keypress at once: the phone's PROCESSING frame and the whole drain sit behind a
+	// network round-trip, so the pill switches locally before the write; OnState refines it later.
+	a.startProcessingPill()
 	if err := c.StopDictation(a.ctx); err != nil {
 		a.logf("dictation stop failed: %v", err)
+		a.stopProcessingPill()
 	}
 }
 

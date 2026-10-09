@@ -44,6 +44,12 @@ type Model struct {
 	InsertedWords int
 	// Error switches the header dot + label to the error colour.
 	Error bool
+	// Processing switches the status mark to the three-dot "Finishing…" indicator and defaults the
+	// header label to "Finishing…". DotPhase (0..2) selects the active dot, so the caller's timer
+	// animates the cycle; the renderer itself is stateless.
+	Processing bool
+	// DotPhase is the active dot index for the Processing mark (taken mod 3).
+	DotPhase int
 	// Dark selects the dark palette (the default for a floating overlay).
 	Dark bool
 	// Preset selects the M3 accent color preset (default cyan).
@@ -102,9 +108,12 @@ func Render(m Model) (Frame, error) {
 			label = "Inserted " + strconv.Itoa(m.InsertedWords) + " words"
 		}
 	} else if label == "" {
-		if m.Error {
+		switch {
+		case m.Error:
 			label = "Dictation error"
-		} else {
+		case m.Processing:
+			label = "Finishing…"
+		default:
 			label = "Listening…"
 		}
 	}
@@ -154,6 +163,10 @@ func Render(m Model) (Frame, error) {
 	} else if isInserted {
 		statusCol = theme.Success
 		drawCheckmark(img, dotX+statusDot*scale/2, dotY+statusDot*scale/2, statusDot*scale*1.4, theme.Success)
+	} else if m.Processing {
+		// Processing: three accent dots, the active one enlarged, mirroring the phone's CLEANING mark.
+		statusCol = theme.Primary
+		drawProcessingDots(img, dotX, dotY, statusDot*scale, m.DotPhase, theme.Primary)
 	} else {
 		// Active Listening: theme-colored pulsing halo + center dot
 		statusCol = theme.Primary
@@ -210,6 +223,35 @@ func bodySpans(committed, provisional string, theme Theme) []span {
 		spans = append(spans, span{text: s, col: theme.OnSurfaceVariant})
 	}
 	return spans
+}
+
+// Processing-dot geometry (logical px), mirroring the phone's CleaningDots: three dots, the active
+// one enlarged and fully opaque, the others dimmed, spaced by procDotGap centre-to-centre.
+const (
+	procDotRadius = 1.6
+	procDotActive = 2.3
+	procDotGap    = 3.4
+	procDotDim    = 115 // uint8 alpha of the two inactive dots (~45% of 255)
+)
+
+// drawProcessingDots draws the three-dot "Finishing…" mark centred in the status-dot box. phase is the
+// active dot index (mod 3); the caller repaints with an advancing phase to animate the cycle.
+func drawProcessingDots(img *image.RGBA, dotX, dotY, dotBox float64, phase int, col color.RGBA) {
+	scale := dotBox / statusDot
+	cx := dotX + dotBox/2
+	cy := dotY + dotBox/2
+	dim := premul(col.R, col.G, col.B, procDotDim)
+	active := ((phase % 3) + 3) % 3
+	for i := 0; i < 3; i++ {
+		x := cx + float64(i-1)*procDotGap*scale
+		r := procDotRadius * scale
+		c := dim
+		if i == active {
+			r = procDotActive * scale
+			c = col
+		}
+		fillRoundRect(img, x-r, cy-r, 2*r, 2*r, r, c)
+	}
 }
 
 type span struct {

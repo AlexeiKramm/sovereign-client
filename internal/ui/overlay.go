@@ -19,10 +19,15 @@ type pillView struct {
 	insertedWords int
 	err           bool
 	shown         bool
+	processing    bool // showing the three-dot "Finishing…" mark
+	dotPhase      int  // active processing dot (0..2), advanced by the overlay's timer
 }
 
 // pillMargin is the logical-pixel gap between the card and the work-area edge.
 const pillMargin = 24.0
+
+// processingDotStep is how long each processing dot stays active, matching the phone's CleaningDots.
+const processingDotStep = 420 * time.Millisecond
 
 // escVK is the Windows virtual-key code for Esc, the pill's dismiss key. The overlay is
 // WS_EX_NOACTIVATE, so it can never receive the key itself; Esc is caught globally and swallowed
@@ -74,6 +79,8 @@ func (a *app) showInsertedPill(words int, delivery string) {
 	}
 	a.pill.provisional = ""
 	a.pill.insertedWords = words
+	a.pill.processing = false
+	a.pill.dotPhase = 0
 	a.pill.shown = true
 	a.pillMu.Unlock()
 	if w != nil {
@@ -154,6 +161,7 @@ func (a *app) showBusyPill(msg string) {
 func (a *app) hidePill() {
 	a.pillMu.Lock()
 	a.pill.shown = false
+	a.pill.processing = false
 	ov := a.overlay
 	w := a.escWatcher
 	a.escWatcher = nil
@@ -219,6 +227,57 @@ func (a *app) updatePill(fn func(*pillView)) {
 	a.repaintPill()
 }
 
+// startProcessingPill switches the pill to its instant "Finishing…" phase and starts the three-dot
+// cycle. It is called the moment a stop is requested — before the network round-trip — so the pill
+// visibly responds to the keypress; the phone's later PROCESSING frame is then a no-op refinement.
+// It is a no-op unless the pill is currently up. Idempotent.
+func (a *app) startProcessingPill() {
+	if a.ensureOverlay() == nil {
+		return
+	}
+	a.pillMu.Lock()
+	if !a.pill.shown {
+		a.pillMu.Unlock()
+		return
+	}
+	a.pill.processing = true
+	a.pill.dotPhase = 0
+	a.procGen++
+	gen := a.procGen
+	if a.pill.insertedWords == 0 && !a.pill.err {
+		a.pill.status = "Finishing…"
+	}
+	a.pillMu.Unlock()
+	a.repaintPill()
+	a.cyclePillDots(gen)
+}
+
+// stopProcessingPill leaves the processing phase. The dot-timer chain stops itself on its next tick
+// (it re-reads the flag).
+func (a *app) stopProcessingPill() {
+	a.pillMu.Lock()
+	a.pill.processing = false
+	a.pill.dotPhase = 0
+	a.pillMu.Unlock()
+}
+
+// cyclePillDots advances the active processing dot and repaints every processingDotStep, until the
+// pill leaves the processing phase or a new episode begins. gen stops a stale chain from an earlier
+// episode instead of letting it drive the current one.
+func (a *app) cyclePillDots(gen int) {
+	time.AfterFunc(processingDotStep, func() {
+		a.pillMu.Lock()
+		if !a.pill.processing || !a.pill.shown || a.procGen != gen {
+			a.pillMu.Unlock()
+			return
+		}
+		a.pill.dotPhase = (a.pill.dotPhase + 1) % 3
+		a.pillMu.Unlock()
+		a.repaintPill()
+		a.cyclePillDots(gen)
+	})
+}
+
 // repaintPill renders the current view and hands the bitmap to the window. The work area and DPI
 // are read per frame so a display change or a drag to another monitor re-anchors correctly.
 func (a *app) repaintPill() {
@@ -243,6 +302,8 @@ func (a *app) repaintPill() {
 		Provisional:   view.provisional,
 		InsertedWords: view.insertedWords,
 		Error:         view.err,
+		Processing:    view.processing,
+		DotPhase:      view.dotPhase,
 		Dark:          a.isDarkTheme(),
 		Preset:        a.themePreset(),
 		Scale:         scale,
