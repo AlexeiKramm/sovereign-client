@@ -73,12 +73,16 @@ type app struct {
 
 	// Pill overlay (Chunk 4c). overlayOnce guards creation; pillMu guards the overlay handle, the
 	// Esc watcher and the view, kept separate from mu so a client callback never nests locks.
-	overlayOnce sync.Once
-	pillMu      sync.Mutex
-	overlay     *winplat.Overlay
-	escWatcher  *winplat.HotkeyWatcher
-	pill        pillView
-	procGen     int // bumps per processing episode so a stale dot-timer chain cannot revive
+	overlayOnce   sync.Once
+	pillMu        sync.Mutex
+	overlay       *winplat.Overlay
+	escWatcher    *winplat.HotkeyWatcher
+	pill          pillView
+	procGen       int         // bumps per processing episode so a stale dot-timer chain cannot revive
+	pillAlpha     int         // current window opacity 0..255 (the fade; layered windows take a whole-frame alpha)
+	fadeGen       int         // bumps per fade episode so a stale fade tick cannot revive
+	lastPillFrame *image.RGBA // last content frame, the "from" of the state crossfade
+	xfadeGen      int         // bumps per crossfade episode so a stale dissolve step cannot revive
 
 	// History store for local dictation transcripts.
 	history *HistoryStore

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"bytes"
+	"image"
 	"math"
 	"time"
 
@@ -29,6 +31,16 @@ const pillMargin = 24.0
 // processingDotStep is how long each processing dot stays active, matching the phone's CleaningDots.
 const processingDotStep = 420 * time.Millisecond
 
+// Animation timings, chosen from docs/pill-animation-lab.html: a snappy fade-in that leads with the
+// content and a gentler fade-out (Balanced), and a short in-place crossfade between discrete states.
+// All three animate on a ~16 ms step.
+const (
+	fadeInDuration    = 120 * time.Millisecond
+	fadeOutDuration   = 220 * time.Millisecond
+	crossfadeDuration = 120 * time.Millisecond
+	fadeStep          = 16 * time.Millisecond
+)
+
 // escVK is the Windows virtual-key code for Esc, the pill's dismiss key. The overlay is
 // WS_EX_NOACTIVATE, so it can never receive the key itself; Esc is caught globally and swallowed
 // while the pill is up, exactly like the dictation hotkey.
@@ -47,7 +59,7 @@ func (a *app) startPill() {
 	a.pill = pillView{status: "Listening…", shown: true}
 	a.pillMu.Unlock()
 	a.watchEsc()
-	a.repaintPill()
+	a.ensurePillVisible()
 }
 
 // showConnectingPill shows a neutral, persistent status while the on-demand discovery ladder runs.
@@ -61,14 +73,13 @@ func (a *app) showConnectingPill(status string) {
 	a.pill = pillView{status: status, shown: true}
 	a.pillMu.Unlock()
 	a.watchEsc()
-	a.repaintPill()
+	a.ensurePillVisible()
 }
 
 // showInsertedPill displays the success feedback state ("Inserted X words") in-place after utterance commit
 // and injection, preserving the card geometry and dimming the final text, then automatically dismisses according to settings.FeedbackDurationSec.
 func (a *app) showInsertedPill(words int, delivery string) {
-	ov := a.ensureOverlay()
-	if ov == nil {
+	if a.ensureOverlay() == nil {
 		return
 	}
 	a.pillMu.Lock()
@@ -86,7 +97,7 @@ func (a *app) showInsertedPill(words int, delivery string) {
 	if w != nil {
 		_ = w.Close()
 	}
-	a.repaintPill()
+	a.ensurePillVisible()
 
 	a.mu.Lock()
 	dur := a.settings.FeedbackDurationSec
@@ -99,12 +110,9 @@ func (a *app) showInsertedPill(words int, delivery string) {
 	time.AfterFunc(time.Duration(dur)*time.Second, func() {
 		a.pillMu.Lock()
 		stale := a.pill.shown && a.pill.insertedWords == words
-		if stale {
-			a.pill.shown = false
-		}
 		a.pillMu.Unlock()
 		if stale {
-			ov.Hide()
+			a.hidePill()
 		}
 	})
 }
@@ -123,14 +131,13 @@ func (a *app) hideListeningPill() {
 // showErrorPill shows the pill in error state with a failure description (e.g. "Phone offline",
 // "Phone busy", etc.), then automatically auto-dismisses after the feedback interval.
 func (a *app) showErrorPill(msg string) {
-	ov := a.ensureOverlay()
-	if ov == nil {
+	if a.ensureOverlay() == nil {
 		return
 	}
 	a.pillMu.Lock()
 	a.pill = pillView{status: msg, shown: true, err: true}
 	a.pillMu.Unlock()
-	a.repaintPill()
+	a.ensurePillVisible()
 
 	a.mu.Lock()
 	dur := a.settings.FeedbackDurationSec
@@ -142,12 +149,9 @@ func (a *app) showErrorPill(msg string) {
 	time.AfterFunc(time.Duration(dur)*time.Second, func() {
 		a.pillMu.Lock()
 		stale := a.pill.shown && a.pill.err && a.pill.status == msg
-		if stale {
-			a.pill.shown = false
-		}
 		a.pillMu.Unlock()
 		if stale {
-			ov.Hide()
+			a.hidePill()
 		}
 	})
 }
@@ -157,31 +161,36 @@ func (a *app) showBusyPill(msg string) {
 	a.showErrorPill(msg)
 }
 
-// hidePill takes the overlay down and stops the Esc watcher. It is idempotent.
+// hidePill starts the fade-out and stops the Esc watcher. It is idempotent.
 func (a *app) hidePill() {
 	a.pillMu.Lock()
 	a.pill.shown = false
 	a.pill.processing = false
-	ov := a.overlay
 	w := a.escWatcher
 	a.escWatcher = nil
 	a.pillMu.Unlock()
-	if ov != nil {
-		ov.Hide()
-	}
 	if w != nil {
 		_ = w.Close()
 	}
+	a.fadeOutPill()
 }
 
-// closePill tears the overlay down for good, on quit.
+// closePill tears the overlay down for good, on quit. It hides immediately rather than fading, then
+// destroys the window.
 func (a *app) closePill() {
-	a.hidePill()
 	a.pillMu.Lock()
+	a.pill.shown = false
+	a.pill.processing = false
+	w := a.escWatcher
+	a.escWatcher = nil
 	ov := a.overlay
 	a.overlay = nil
 	a.pillMu.Unlock()
+	if w != nil {
+		_ = w.Close()
+	}
 	if ov != nil {
+		ov.Hide()
 		_ = ov.Close()
 	}
 }
@@ -205,17 +214,18 @@ func (a *app) ensureOverlay() *winplat.Overlay {
 	return a.overlay
 }
 
-// setPillStatus updates the header line ("Listening…", "Finishing…", …).
+// setPillStatus updates the header line ("Listening…", "Finishing…", …) with a crossfade, because it
+// is a discrete state change rather than streaming text.
 func (a *app) setPillStatus(status string) {
-	a.updatePill(func(v *pillView) {
+	a.updatePillTransition(func(v *pillView) {
 		if v.insertedWords == 0 && !v.err {
 			v.status = status
 		}
 	})
 }
 
-// updatePill applies fn to the view and repaints, but only while the pill is showing, so late
-// frames from a session that already ended cannot resurrect it.
+// updatePill applies fn to the view and repaints instantly, but only while the pill is showing, so
+// late frames from a session that already ended cannot resurrect it. Streaming text uses this.
 func (a *app) updatePill(fn func(*pillView)) {
 	a.pillMu.Lock()
 	if !a.pill.shown {
@@ -225,6 +235,18 @@ func (a *app) updatePill(fn func(*pillView)) {
 	fn(&a.pill)
 	a.pillMu.Unlock()
 	a.repaintPill()
+}
+
+// updatePillTransition is updatePill for a discrete state change, crossfading instead of snapping.
+func (a *app) updatePillTransition(fn func(*pillView)) {
+	a.pillMu.Lock()
+	if !a.pill.shown {
+		a.pillMu.Unlock()
+		return
+	}
+	fn(&a.pill)
+	a.pillMu.Unlock()
+	a.crossfadePill()
 }
 
 // startProcessingPill switches the pill to its instant "Finishing…" phase and starts the three-dot
@@ -248,7 +270,7 @@ func (a *app) startProcessingPill() {
 		a.pill.status = "Finishing…"
 	}
 	a.pillMu.Unlock()
-	a.repaintPill()
+	a.crossfadePill()
 	a.cyclePillDots(gen)
 }
 
@@ -278,17 +300,154 @@ func (a *app) cyclePillDots(gen int) {
 	})
 }
 
-// repaintPill renders the current view and hands the bitmap to the window. The work area and DPI
-// are read per frame so a display change or a drag to another monitor re-anchors correctly.
+// ensurePillVisible fades the window in if it is not already fully opaque; when it is already up it
+// crossfades to the (possibly) changed content. It is called whenever the pill becomes logically
+// shown.
+func (a *app) ensurePillVisible() {
+	a.pillMu.Lock()
+	a.pill.shown = true
+	alpha := a.pillAlpha
+	a.pillMu.Unlock()
+	if alpha >= 255 {
+		a.crossfadePill()
+		return
+	}
+	a.fadePillTo(255, fadeInDuration)
+}
+
+// fadeOutPill fades the window to zero and then hides it.
+func (a *app) fadeOutPill() {
+	a.fadePillTo(0, fadeOutDuration)
+}
+
+// fadePillTo animates the whole-frame alpha toward target over dur, repainting each ~16 ms step, and
+// hides the window when it reaches zero. Every call bumps a generation, so a newer fade (e.g. the pill
+// is shown again mid-fade-out) stops the older one.
+func (a *app) fadePillTo(target int, dur time.Duration) {
+	a.pillMu.Lock()
+	start := a.pillAlpha
+	a.fadeGen++
+	a.xfadeGen++ // a fade cancels any in-flight state crossfade
+	gen := a.fadeGen
+	a.pillMu.Unlock()
+
+	if start == target {
+		if target == 0 {
+			a.hideOverlayNow()
+		}
+		return
+	}
+
+	steps := int(dur / fadeStep)
+	if steps < 1 {
+		steps = 1
+	}
+	delta := target - start
+	for i := 1; i <= steps; i++ {
+		frac := float64(i) / float64(steps)
+		val := start + int(math.Round(float64(delta)*frac))
+		delay := time.Duration(float64(dur) * frac)
+		time.AfterFunc(delay, func() {
+			a.pillMu.Lock()
+			if a.fadeGen != gen {
+				a.pillMu.Unlock()
+				return
+			}
+			shown := a.pill.shown
+			a.pillAlpha = val
+			a.pillMu.Unlock()
+			if val == 0 && !shown {
+				a.hideOverlayNow()
+				return
+			}
+			a.repaintPill()
+		})
+	}
+}
+
+// hideOverlayNow zeroes the alpha and hides the window immediately.
+func (a *app) hideOverlayNow() {
+	a.pillMu.Lock()
+	a.pillAlpha = 0
+	ov := a.overlay
+	a.pillMu.Unlock()
+	if ov != nil {
+		ov.Hide()
+	}
+}
+
+// repaintPill renders the current view and hands the bitmap to the window at the current alpha. The
+// work area and DPI are read per frame so a display change or a drag to another monitor re-anchors
+// correctly. It is the instant path: streaming text, the processing-dot tick and the fade steps.
 func (a *app) repaintPill() {
 	a.pillMu.Lock()
 	view := a.pill
 	ov := a.overlay
+	alpha := a.pillAlpha
 	a.pillMu.Unlock()
-	if ov == nil || !view.shown {
+	if ov == nil || (!view.shown && alpha == 0) {
+		return
+	}
+	frame, x, y, ok := a.renderPillFrame(view)
+	if !ok {
+		return
+	}
+	a.cachePillFrame(frame.Img)
+	ov.PresentAlpha(frame.Img, x, y, uint8(alpha))
+}
+
+// crossfadePill renders the current view and, when it differs from the last presented frame, dissolves
+// from the old to the new over crossfadeDuration. It is the discrete-state-change path (listening /
+// warming / finishing / inserted / error), never the streaming-text or dot-tick path.
+func (a *app) crossfadePill() {
+	a.pillMu.Lock()
+	view := a.pill
+	ov := a.overlay
+	alpha := a.pillAlpha
+	from := a.lastPillFrame
+	a.xfadeGen++
+	gen := a.xfadeGen
+	a.pillMu.Unlock()
+	if ov == nil || (!view.shown && alpha == 0) {
+		return
+	}
+	frame, x, y, ok := a.renderPillFrame(view)
+	if !ok {
+		return
+	}
+	a.cachePillFrame(frame.Img)
+	if alpha == 0 || from == nil || from.Bounds() != frame.Img.Bounds() || bytes.Equal(from.Pix, frame.Img.Pix) {
+		ov.PresentAlpha(frame.Img, x, y, uint8(alpha))
 		return
 	}
 
+	steps := int(crossfadeDuration / fadeStep)
+	if steps < 1 {
+		steps = 1
+	}
+	for i := 1; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		delay := time.Duration(float64(crossfadeDuration) * t)
+		blended := blendImages(from, frame.Img, t)
+		time.AfterFunc(delay, func() {
+			a.pillMu.Lock()
+			if a.xfadeGen != gen {
+				a.pillMu.Unlock()
+				return
+			}
+			al := a.pillAlpha
+			a.pillMu.Unlock()
+			if al == 0 {
+				return
+			}
+			ov.PresentAlpha(blended, x, y, uint8(al))
+		})
+	}
+}
+
+// renderPillFrame renders the view and returns the frame plus the window position (the card's top-left
+// minus the shadow pad) for the current work area and DPI.
+func (a *app) renderPillFrame(view pillView) (render.Frame, int, int, bool) {
 	a.mu.Lock()
 	target := a.target
 	pos := a.settings.OverlayPosition
@@ -310,11 +469,29 @@ func (a *app) repaintPill() {
 	})
 	if err != nil {
 		a.logf("pill render failed: %v", err)
-		return
+		return render.Frame{}, 0, 0, false
 	}
 	cw, ch := frame.Size()
 	x, y := anchorPos(work, cw, ch, pos, dpi)
-	ov.Present(frame.Img, x-frame.Pad, y-frame.Pad)
+	return frame, x - frame.Pad, y - frame.Pad, true
+}
+
+// cachePillFrame remembers the last content frame so the next state change can dissolve from it.
+func (a *app) cachePillFrame(img *image.RGBA) {
+	a.pillMu.Lock()
+	a.lastPillFrame = img
+	a.pillMu.Unlock()
+}
+
+// blendImages linearly interpolates two same-sized premultiplied frames; t=0 is from, t=1 is to. The
+// images are premultiplied, so interpolating the bytes directly is the correct cross-dissolve.
+func blendImages(from, to *image.RGBA, t float64) *image.RGBA {
+	out := image.NewRGBA(from.Bounds())
+	for i := range out.Pix {
+		f := float64(from.Pix[i])
+		out.Pix[i] = uint8(f + (float64(to.Pix[i])-f)*t + 0.5)
+	}
+	return out
 }
 
 // anchorPos places the card's top-left corner for the configured overlay position.
@@ -364,7 +541,7 @@ func (a *app) watchEsc() {
 }
 
 // cancelDictation discards an active session (no UTTERANCE_DONE, so nothing is injected). The pill is
-// local feedback, so it is dismissed immediately rather than waiting for the phone's
+// local feedback, so it is dismissed locally (fading out) rather than waiting for the phone's
 // SESSION_RELEASED — that network round-trip was the whole perceived latency of the Esc key. The
 // cancelled session still ends on the wire below, and the later SESSION_RELEASED handling is
 // idempotent. It also abandons a deferred dictation that is still waiting for the link, so Esc on the

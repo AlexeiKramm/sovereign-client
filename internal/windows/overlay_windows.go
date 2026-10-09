@@ -61,9 +61,10 @@ type Overlay struct {
 
 // overlayFrame is one marshalled Present/Hide request.
 type overlayFrame struct {
-	img  *image.RGBA
-	x, y int
-	hide bool
+	img   *image.RGBA
+	x, y  int
+	alpha uint8 // SourceConstantAlpha for the whole frame (255 = opaque); the pill's fade uses it
+	hide  bool
 }
 
 // StartOverlay creates the hidden pill window. onDisplayChange, if set, is called (on the window
@@ -138,11 +139,18 @@ func (o *Overlay) Move(x, y int) {
 }
 
 // Present uploads img as the window content and places the window's top-left corner at screen
-// position (x, y), then shows it without activating. img must be premultiplied RGBA (render.Frame
-// is), which is exactly what UpdateLayeredWindow expects with AC_SRC_ALPHA.
+// position (x, y), then shows it without activating, at full opacity. img must be premultiplied RGBA
+// (render.Frame is), which is exactly what UpdateLayeredWindow expects with AC_SRC_ALPHA.
 func (o *Overlay) Present(img *image.RGBA, x, y int) {
+	o.PresentAlpha(img, x, y, 255)
+}
+
+// PresentAlpha is Present with a whole-frame opacity: alpha scales every pixel via
+// UpdateLayeredWindow's SourceConstantAlpha, so the pill can fade in and out without re-scaling its
+// pixels. alpha 0 is fully transparent, 255 fully opaque.
+func (o *Overlay) PresentAlpha(img *image.RGBA, x, y int, alpha uint8) {
 	o.mu.Lock()
-	o.pending = &overlayFrame{img: img, x: x, y: y}
+	o.pending = &overlayFrame{img: img, x: x, y: y, alpha: alpha}
 	o.mu.Unlock()
 	o.wake()
 }
@@ -384,7 +392,7 @@ func (o *Overlay) apply() {
 		procShowWindow.Call(o.hwnd, swHide)
 		return
 	}
-	if err := o.upload(fr.img, fr.x, fr.y); err != nil {
+	if err := o.upload(fr.img, fr.x, fr.y, fr.alpha); err != nil {
 		// A failed frame is not fatal: record it for diagnostics and skip it, so a transient GDI
 		// hiccup cannot take down the pill.
 		o.mu.Lock()
@@ -408,8 +416,8 @@ func (o *Overlay) apply() {
 }
 
 // upload copies the premultiplied RGBA image into a top-down 32-bit DIB and hands it to
-// UpdateLayeredWindow. The DIB is recreated only when the size changes.
-func (o *Overlay) upload(img *image.RGBA, x, y int) error {
+// UpdateLayeredWindow at the given whole-frame alpha. The DIB is recreated only when the size changes.
+func (o *Overlay) upload(img *image.RGBA, x, y int, alpha uint8) error {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if w <= 0 || h <= 0 {
@@ -467,7 +475,7 @@ func (o *Overlay) upload(img *image.RGBA, x, y int) error {
 	ptDst := point{X: int32(x), Y: int32(y)}
 	size := struct{ cx, cy int32 }{int32(w), int32(h)}
 	ptSrc := point{}
-	blend := blendFunction{blendOp: acSrcOver, sourceConstantAlpha: 255, alphaFormat: acSrcAlpha}
+	blend := blendFunction{blendOp: acSrcOver, sourceConstantAlpha: alpha, alphaFormat: acSrcAlpha}
 	r, _, e := procUpdateLayeredWindow.Call(
 		o.hwnd,
 		screenDC,

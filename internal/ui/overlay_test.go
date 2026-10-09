@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"bytes"
+	"image"
 	"testing"
 
 	"github.com/alexeikramm/sovereign-client/internal/core"
@@ -105,5 +107,39 @@ func TestHideListeningPillPreservesFeedbackCapsule(t *testing.T) {
 	a.hidePill()
 	if a.pill.shown {
 		t.Fatalf("expected hidePill to dismiss the pill")
+	}
+}
+
+// TestBlendImages pins the cross-dissolve: t=0 is the from frame, t=1 the to frame, and the midpoint
+// is their rounded average, so a state change dissolves rather than fading through a blank.
+func TestBlendImages(t *testing.T) {
+	from := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	from.Pix = []byte{0, 0, 0, 0, 200, 100, 50, 255}
+	to := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	to.Pix = []byte{100, 200, 50, 255, 0, 0, 0, 0}
+
+	if got := blendImages(from, to, 0); !bytes.Equal(got.Pix, from.Pix) {
+		t.Fatalf("t=0 blend = %v, want the from frame %v", got.Pix, from.Pix)
+	}
+	if got := blendImages(from, to, 1); !bytes.Equal(got.Pix, to.Pix) {
+		t.Fatalf("t=1 blend = %v, want the to frame %v", got.Pix, to.Pix)
+	}
+	want := []byte{50, 100, 25, 128, 100, 50, 25, 128}
+	if got := blendImages(from, to, 0.5); !bytes.Equal(got.Pix, want) {
+		t.Fatalf("t=0.5 blend = %v, want %v", got.Pix, want)
+	}
+}
+
+// TestFadeTimings pins the chosen motion (the Balanced preset from the animation lab): the fade-in is
+// snappier than the fade-out, and the step is positive.
+func TestFadeTimings(t *testing.T) {
+	if fadeInDuration >= fadeOutDuration {
+		t.Fatalf("fade-in (%v) must be snappier than fade-out (%v)", fadeInDuration, fadeOutDuration)
+	}
+	if fadeStep <= 0 || fadeStep > fadeInDuration {
+		t.Fatalf("fadeStep %v is not a sane step for the fade-in %v", fadeStep, fadeInDuration)
+	}
+	if crossfadeDuration <= 0 {
+		t.Fatal("crossfadeDuration must be positive")
 	}
 }

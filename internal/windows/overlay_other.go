@@ -32,6 +32,9 @@ func CursorPos() (int, int) { return 0, 0 }
 // Present is a no-op off Windows.
 func (o *Overlay) Present(img *image.RGBA, x, y int) {}
 
+// PresentAlpha is a no-op off Windows.
+func (o *Overlay) PresentAlpha(img *image.RGBA, x, y int, alpha uint8) {}
+
 // Hide is a no-op off Windows.
 func (o *Overlay) Hide() {}
 
