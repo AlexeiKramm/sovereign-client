@@ -16,18 +16,24 @@ import (
 )
 
 const (
-	// HeartbeatInterval is how often the client sends PING (PROTOCOL.md §1/§9).
+	// HeartbeatInterval is how often the client sends PING while a dictation session is in flight
+	// (PROTOCOL.md §1/§9).
 	HeartbeatInterval = 5 * time.Second
-	// HeartbeatTimeout is how long the client waits for any inbound frame before it treats the
-	// link as dead, closes it and reconnects (PROTOCOL.md §1/§9).
+	// HeartbeatTimeout is how long the client waits for any inbound frame before it treats a
+	// dictating link as dead (PROTOCOL.md §1/§9).
 	HeartbeatTimeout = 15 * time.Second
+	// IdleHeartbeatInterval is the PING cadence on an authenticated but idle link. The desktop keeps
+	// the link open while connected, but relaxes the tick so an open, unused socket does not wake the
+	// phone's radio every 5 s (D-131).
+	IdleHeartbeatInterval = 30 * time.Second
+	// IdleHeartbeatTimeout is the dead-link timeout on an idle link. It must exceed
+	// IdleHeartbeatInterval so a single late PONG does not kill a healthy link, and it sits well
+	// under the phone's own 90 s idle reap.
+	IdleHeartbeatTimeout = 60 * time.Second
 
 	dialTimeout  = 10 * time.Second
 	writeTimeout = 10 * time.Second
 )
-
-// reconnectBackoff is the capped backoff sequence (PROTOCOL.md §9): 0 → 500 ms → 1 s → 2 s.
-var reconnectBackoff = []time.Duration{0, 500 * time.Millisecond, time.Second, 2 * time.Second}
 
 // ErrNotConnected is returned by command methods when no authenticated link is up.
 var ErrNotConnected = errors.New("not connected to the phone")
@@ -74,8 +80,9 @@ type ClientConfig struct {
 	Logf     func(format string, args ...any)
 }
 
-// Client owns one logical link to a phone: it dials, authenticates, heartbeats, reconnects with
-// backoff, and dispatches session frames to Handlers. It is safe for concurrent command calls.
+// Client owns one logical link to a phone: it dials, authenticates, heartbeats, and dispatches
+// session frames to Handlers. A drop ends the link; the caller decides whether to connect again.
+// It is safe for concurrent command calls.
 type Client struct {
 	cfg    ClientConfig
 	tlsCfg *tls.Config
@@ -110,53 +117,45 @@ func NewClient(cfg ClientConfig) *Client {
 	return c
 }
 
-// Run connects and reconnects until ctx is cancelled. It returns ctx.Err() on shutdown, or an
-// *AuthError if the phone rejects this client's identity (which needs a re-pair, not a retry).
+// Run makes one connection attempt, serves the link until it drops, and returns. It does NOT
+// reconnect: the desktop is connect-on-demand (D-131), so a drop returns to Idle and the next hotkey
+// drives the next attempt. It returns ctx.Err() on shutdown, an *AuthError if the phone rejects this
+// client's identity (a re-pair, not a retry), ErrPinMismatch on a possible MITM, or the transport
+// error when an established link drops.
 func (c *Client) Run(ctx context.Context) error {
-	attempt := 0
-	for {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	c.setState(StateConnecting, "")
+	lc, err := c.connect(ctx)
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		c.setState(StateConnecting, "")
-		lc, err := c.connect(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			var ae *AuthError
-			if errors.As(err, &ae) {
-				c.setState(StateAuthFailed, err.Error())
-				return err
-			}
-			// A pin mismatch is a possible MITM: surface it, never retry silently (§1/§10).
-			if errors.Is(err, ErrPinMismatch) {
-				c.setState(StateDisconnected, err.Error())
-				return err
-			}
+		var ae *AuthError
+		switch {
+		case errors.As(err, &ae):
+			c.setState(StateAuthFailed, err.Error())
+		// A pin mismatch is a possible MITM: surface it, never retry silently (§1/§10).
+		case errors.Is(err, ErrPinMismatch):
+			c.setState(StateDisconnected, err.Error())
+		default:
 			c.setState(StateDisconnected, err.Error())
 			c.logf("connect failed: %v", err)
-			if !sleep(ctx, reconnectBackoff[min(attempt, len(reconnectBackoff)-1)]) {
-				return ctx.Err()
-			}
-			attempt++
-			continue
 		}
-
-		attempt = 0
-		c.setLive(lc)
-		c.setState(StateReady, "")
-		err = c.readLoop(ctx, lc)
-		c.setLive(nil)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		c.setState(StateDisconnected, errString(err))
-		c.logf("link down: %v", err)
-		if !sleep(ctx, reconnectBackoff[1]) {
-			return ctx.Err()
-		}
+		return err
 	}
+
+	c.setLive(lc)
+	c.setState(StateReady, "")
+	err = c.readLoop(ctx, lc)
+	c.setLive(nil)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	c.setState(StateDisconnected, errString(err))
+	c.logf("link down: %v", err)
+	return err
 }
 
 // StartDictation asks the phone to begin a session; the reply arrives as OnStarted or OnBusy.
@@ -283,8 +282,10 @@ func (c *Client) readLoop(ctx context.Context, lc *liveConn) error {
 	}
 }
 
-// heartbeat sends PING every HeartbeatInterval and declares the link dead after HeartbeatTimeout
-// with no inbound frame. cancel tears down the read loop so Run reconnects.
+// heartbeat sends PING and declares the link dead when no inbound frame arrives. The cadence is
+// adaptive (D-131): 5 s while a dictation session is in flight, relaxed to IdleHeartbeatInterval when
+// idle, so an open but unused link does not wake the phone's radio every 5 s. cancel tears down the
+// read loop so Run returns.
 func (c *Client) heartbeat(ctx context.Context, lc *liveConn, cancel context.CancelFunc) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -294,13 +295,14 @@ func (c *Client) heartbeat(ctx context.Context, lc *liveConn, cancel context.Can
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if time.Since(lc.lastRxTime()) >= HeartbeatTimeout {
-				c.logf("heartbeat: no frame in %s, declaring link dead", HeartbeatTimeout)
+			interval, timeout := heartbeatTiming(c.currentSession() != "")
+			if time.Since(lc.lastRxTime()) >= timeout {
+				c.logf("heartbeat: no frame in %s, declaring link dead", timeout)
 				lc.ws.Close(websocket.StatusPolicyViolation, "heartbeat timeout")
 				cancel()
 				return
 			}
-			if time.Since(lastPing) < HeartbeatInterval {
+			if time.Since(lastPing) < interval {
 				continue
 			}
 			lastPing = time.Now()
@@ -311,6 +313,16 @@ func (c *Client) heartbeat(ctx context.Context, lc *liveConn, cancel context.Can
 			}
 		}
 	}
+}
+
+// heartbeatTiming returns the PING cadence and dead-link timeout for the current activity: the
+// protocol's 5 s / 15 s while a dictation is in flight, and the relaxed 30 s / 60 s otherwise
+// (D-131).
+func heartbeatTiming(active bool) (interval, timeout time.Duration) {
+	if active {
+		return HeartbeatInterval, HeartbeatTimeout
+	}
+	return IdleHeartbeatInterval, IdleHeartbeatTimeout
 }
 
 // dispatch routes one decoded frame to Handlers and maintains the session/latency bookkeeping.
@@ -467,20 +479,6 @@ func mustMessageType(wire string) MessageType {
 		panic("sovereign: unknown catalogue message type " + wire)
 	}
 	return mt
-}
-
-func sleep(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }
 
 func errString(err error) string {

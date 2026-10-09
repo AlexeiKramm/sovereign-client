@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/alexeikramm/sovereign-client/internal/core"
 )
@@ -55,43 +54,36 @@ func TestBusyStateLabel(t *testing.T) {
 	}
 }
 
-// TestRequestFullResolveSetsAndKicks pins that a hotkey asks the connect manager for the full
-// discovery ladder and wakes a waiting loop, without touching the network.
-func TestRequestFullResolveSetsAndKicks(t *testing.T) {
-	a := &app{resolveKick: make(chan struct{}, 1)}
-	a.requestFullResolve()
-	a.mu.Lock()
-	full := a.resolveFull
-	a.mu.Unlock()
-	if !full {
-		t.Fatal("requestFullResolve did not set resolveFull")
+// TestResolveManualAddr pins that a manual -addr bypasses discovery entirely (no network), which is
+// what keeps the connect-on-demand path cheap when the user pinned an address.
+func TestResolveManualAddr(t *testing.T) {
+	a := &app{opts: Options{Addr: "192.0.2.5:8765", Pin: "PIN"}}
+	addr, pin, err := a.resolve(context.Background(), "")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
-	select {
-	case <-a.resolveKick:
-	case <-time.After(time.Second):
-		t.Fatal("requestFullResolve did not kick the connect loop")
+	if addr != "192.0.2.5:8765" || pin != "PIN" {
+		t.Fatalf("resolve = %q, %q, want the manual addr and pin", addr, pin)
 	}
 }
 
-// TestWaitRetryWakesOnKick pins that an explicit resolve request interrupts the reconnect backoff.
-func TestWaitRetryWakesOnKick(t *testing.T) {
-	a := &app{resolveKick: make(chan struct{}, 1)}
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		a.resolveKick <- struct{}{}
-	}()
-	if !a.waitRetry(context.Background()) {
-		t.Fatal("waitRetry returned false after a kick")
+// TestConnectNoopWhenUnpaired pins that the on-demand connector does nothing without stored
+// credentials, so launching an unpaired app never touches the network.
+func TestConnectNoopWhenUnpaired(t *testing.T) {
+	a := &app{ctx: context.Background()}
+	a.connect()
+	if a.connecting || a.connCancel != nil {
+		t.Fatal("connect started while unpaired")
 	}
 }
 
-// TestWaitRetryStopsOnCancel pins that a cancelled manager stops waiting promptly.
-func TestWaitRetryStopsOnCancel(t *testing.T) {
-	a := &app{resolveKick: make(chan struct{}, 1)}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if a.waitRetry(ctx) {
-		t.Fatal("waitRetry returned true after cancellation")
+// TestConnectDedupesInFlight pins that a second connect request while one is in flight is absorbed
+// (the pending intent is served when the link comes up) rather than starting a parallel attempt.
+func TestConnectDedupesInFlight(t *testing.T) {
+	a := &app{ctx: context.Background(), paired: true, connecting: true}
+	a.connect()
+	if a.connCancel != nil {
+		t.Fatal("connect started a second attempt while one was in flight")
 	}
 }
 

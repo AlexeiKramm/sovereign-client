@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,5 +228,98 @@ func TestWebSocketURL(t *testing.T) {
 		if _, err := url.Parse(got); err != nil {
 			t.Errorf("url.Parse(%q) failed: %v", got, err)
 		}
+	}
+}
+
+// TestRunDoesNotReconnectAfterDrop pins D-131: once an established link drops, Run returns instead
+// of dialing again. The next attempt belongs to the next hotkey, not to the transport.
+func TestRunDoesNotReconnectAfterDrop(t *testing.T) {
+	var mu sync.Mutex
+	conns := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		mu.Lock()
+		conns++
+		mu.Unlock()
+		ctx := r.Context()
+		if _, err := readMsg(ctx, ws); err != nil {
+			return
+		}
+		_ = writeMsg(ctx, ws, mustMessageType("WELCOME"), &WelcomePayload{
+			Protover: Version, DeviceID: "phone-1", ServerName: "Test Phone",
+			Capabilities: []string{}, MaxFrameBytes: MaxFrameBytes,
+		})
+		// WELCOME sent; returning closes the link immediately (the drop under test).
+	}))
+	defer server.Close()
+
+	pin := Fingerprint(server.Certificate())
+	client := NewClient(ClientConfig{
+		Addr:  hostOf(t, server.URL),
+		Pin:   pin,
+		Ident: Identity{DeviceID: "desk-1"},
+		Creds: Credentials{Token: "tok", ServerSpki: pin},
+		Logf:  t.Logf,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Run(ctx); err == nil {
+		t.Fatal("Run returned nil after the link dropped")
+	}
+
+	// Give any (forbidden) reconnect time to land before counting.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	got := conns
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("server saw %d connections, want exactly 1 (Run must not reconnect)", got)
+	}
+}
+
+// TestRunFailsFastOnRefusedDial pins the single-attempt policy: a refused dial returns promptly
+// rather than looping. Connection-refused is immediate, so five seconds is a generous ceiling.
+func TestRunFailsFastOnRefusedDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	client := NewClient(ClientConfig{
+		Addr:  addr,
+		Pin:   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		Ident: Identity{DeviceID: "desk-1"},
+		Creds: Credentials{Token: "tok"},
+		Logf:  t.Logf,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := client.Run(ctx); err == nil {
+		t.Fatal("Run returned nil for a refused dial")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Run took %v; a refused dial must fail fast instead of retrying", elapsed)
+	}
+}
+
+// TestHeartbeatTimingAdapts pins D-131's adaptive cadence and the slack that keeps a healthy idle
+// link from being declared dead by a single late PONG.
+func TestHeartbeatTimingAdapts(t *testing.T) {
+	if iv, to := heartbeatTiming(true); iv != HeartbeatInterval || to != HeartbeatTimeout {
+		t.Fatalf("active timing = %v/%v, want %v/%v", iv, to, HeartbeatInterval, HeartbeatTimeout)
+	}
+	if iv, to := heartbeatTiming(false); iv != IdleHeartbeatInterval || to != IdleHeartbeatTimeout {
+		t.Fatalf("idle timing = %v/%v, want %v/%v", iv, to, IdleHeartbeatInterval, IdleHeartbeatTimeout)
+	}
+	if IdleHeartbeatTimeout <= IdleHeartbeatInterval {
+		t.Fatalf("idle timeout %v must exceed idle interval %v", IdleHeartbeatTimeout, IdleHeartbeatInterval)
 	}
 }

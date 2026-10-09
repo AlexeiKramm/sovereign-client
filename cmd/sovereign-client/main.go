@@ -1,6 +1,6 @@
 // Command sovereign-client is the Windows tray client for the Sovereign phone server.
 //
-// With no flags it runs the tray app: single instance, connect/reconnect to the phone, tray state,
+// With no flags it runs the tray app: single instance, connect-on-demand to the phone, tray state,
 // the settings shell, global hotkeys with text injection, and the floating pill overlay. The flags
 // below drive the same transport headlessly for development and verification.
 package main

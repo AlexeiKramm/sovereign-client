@@ -14,8 +14,8 @@ import (
 type TrayState int
 
 const (
-	StateOffline    TrayState = iota // server not running / out of range
-	StateConnecting                  // found the phone; establishing or recovering the link
+	StateOffline    TrayState = iota // no link: paired-but-idle, unpaired, or the phone is out of range
+	StateConnecting                  // found the phone; establishing the link
 	StateReady                       // authenticated and idle; hotkeys armed
 	StateDictating                   // hotkey active; phone mic recording
 	StateBusy                        // the phone is taken by another capture; the link is fine
@@ -52,7 +52,7 @@ func stateLabel(s TrayState) string {
 	case StateError:
 		return "Error"
 	default:
-		return "Offline"
+		return "Idle"
 	}
 }
 

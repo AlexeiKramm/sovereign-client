@@ -57,13 +57,9 @@ type app struct {
 	client        *core.Client
 	connecting    bool
 	connCancel    context.CancelFunc
-	attemptCancel context.CancelFunc      // cancels only the in-flight connect attempt, not the manager
 	connState     core.ConnState          // last transport state reported by OnConn
-	resolveFull   bool                    // the next resolve must run the full ladder (user-asked)
-	reResolve     bool                    // the in-flight attempt was cancelled to re-resolve
 	pending       bool                    // a hotkey/test is waiting for a link to dictate over
 	pendingTest   bool                    // the pending dictation is the 5 s "Test dictation"
-	resolveKick   chan struct{}           // buffered(1): wake the connect loop for an immediate resolve
 	dictating     bool                    // a hotkey-initiated session is live
 	busy          bool                    // the phone is taken by another capture (link is healthy)
 	phoneState    core.ServerStatePayload // last unsolicited SERVER_STATE (v1.1); advisory
@@ -151,21 +147,18 @@ func (a *app) onReady() {
 	}
 	a.history = NewHistoryStore(histPath)
 
-	a.resolveKick = make(chan struct{}, 1)
 	a.buildMenu(paired)
-	a.setState(StateOffline, "starting")
+	if paired {
+		a.setState(StateOffline, "")
+	} else {
+		a.setState(StateOffline, "not paired")
+	}
 	// Warm the pill overlay so the first dictation's pill has no window-creation cost on top of the
 	// (now eliminated) wait for the phone's acknowledgement.
 	go a.ensureOverlay()
-	a.logf("tray ready; paired=%v", paired)
-	if paired {
-		// The first connect runs the full ladder once to learn the phone's address. After that the
-		// background only retries the remembered address, and the full ladder is user-asked.
-		a.mu.Lock()
-		a.resolveFull = true
-		a.mu.Unlock()
-	}
-	go a.connect()
+	a.logf("tray ready; paired=%v (connect-on-demand)", paired)
+	// Connect-on-demand (D-131): nothing is dialed or scanned at launch. The first hotkey runs the
+	// discovery ladder and connects.
 }
 
 func (a *app) onExit() {
@@ -174,9 +167,9 @@ func (a *app) onExit() {
 
 func (a *app) buildMenu(paired bool) {
 	systray.SetIcon(trayIcon(StateOffline))
-	systray.SetTooltip("Sovereign — Offline")
+	systray.SetTooltip("Sovereign — Idle")
 
-	a.mStatus = systray.AddMenuItem("Offline", "Connection status")
+	a.mStatus = systray.AddMenuItem("Idle", "Connection status")
 	a.mStatus.Disable()
 	a.mTest = systray.AddMenuItem("Test dictation (5s)", "Start and stop a five-second dictation")
 	a.mTest.Disable()
@@ -265,7 +258,9 @@ func (a *app) applyTrayState(s TrayState, detail string) {
 	a.setPanelStatus(title)
 
 	if a.mTest != nil {
-		if s == StateReady || s == StateBusy {
+		// The test drives the same connect-on-demand path as a hotkey, so it is available whenever
+		// there is a phone to reach, not only while a link is already up.
+		if s == StateReady || s == StateBusy || a.isPaired() {
 			a.mTest.Enable()
 		} else {
 			a.mTest.Disable()
@@ -280,10 +275,10 @@ func hotkeysLive(s TrayState) bool {
 	return true
 }
 
-// connect resolves the phone and runs the client until the link dies fatally or the app exits.
-// Only one connect goroutine runs at a time. Discovery is on demand: a background retry only probes
-// the remembered address (cheap and silent), while the full ladder — remembered address, short
-// mDNS, then the subnet sweep — runs at startup and whenever a hotkey asks for a link.
+// connect runs one on-demand connection attempt to the phone and serves the link until it drops.
+// Only one attempt runs at a time. Nothing here retries in the background (D-131): a failed attempt
+// reports an error and returns, and the next hotkey drives the next attempt. A hotkey that arrives
+// while an attempt is winding down is served by its pending intent.
 func (a *app) connect() {
 	a.mu.Lock()
 	if a.connecting || !a.paired {
@@ -293,6 +288,7 @@ func (a *app) connect() {
 	a.connecting = true
 	cctx, ccancel := context.WithCancel(a.ctx)
 	a.connCancel = ccancel
+	hint := a.settings.LastAddr
 	a.mu.Unlock()
 
 	defer func() {
@@ -301,101 +297,83 @@ func (a *app) connect() {
 		a.connecting = false
 		a.client = nil
 		a.connCancel = nil
-		a.attemptCancel = nil
-		retry := a.pending || a.resolveFull
+		retry := a.pending
 		a.mu.Unlock()
 		if retry {
-			// A hotkey arrived while the manager was shutting down; run the ladder again for it.
+			// A hotkey arrived while this attempt was winding down; run the ladder again for it.
 			go a.connect()
 		}
 	}()
 
-	for cctx.Err() == nil {
-		a.mu.Lock()
-		full := a.resolveFull
-		a.resolveFull = false
-		hint := a.settings.LastAddr
-		a.mu.Unlock()
-
-		target, pin, err := a.resolve(cctx, hint, full)
-		if err != nil {
-			if cctx.Err() != nil {
-				return
-			}
-			a.logf("discovery failed: %v", err)
-			if full {
-				// A user asked for this resolve; report where they are looking rather than hiding
-				// the failure in the tray.
-				a.setState(StateError, "no phone found")
-				a.failPendingDictation("No phone found — is the phone on this network?")
-			} else {
-				a.setState(StateOffline, "searching for the phone")
-			}
-			if !a.waitRetry(cctx) {
-				return
-			}
-			continue
-		}
-
-		a.setLastAddr(target)
-
-		client := core.NewClient(core.ClientConfig{
-			Addr:     target,
-			Pin:      pin,
-			Ident:    a.opts.Identity,
-			Creds:    a.credsSnapshot(),
-			Handlers: a.handlers(),
-			Logf:     a.logf,
-		})
-		actx, acancel := context.WithCancel(cctx)
-		a.mu.Lock()
-		a.client = client
-		a.attemptCancel = acancel
-		a.mu.Unlock()
-
-		a.logf("connecting to wss://%s%s", target, core.Path)
-		err = client.Run(actx)
-
-		a.mu.Lock()
-		a.client = nil
-		a.attemptCancel = nil
-		re := a.reResolve
-		a.reResolve = false
-		a.mu.Unlock()
+	// Connect-on-demand always runs the full ladder. Its first rung is the cheap, silent
+	// remembered-address probe, so a warm reconnect still skips mDNS and the subnet sweep.
+	target, pin, err := a.resolve(cctx, hint)
+	if err != nil {
 		if cctx.Err() != nil {
 			return
 		}
-		if re {
-			// A hotkey asked for a fresh resolve: keep its deferred dictation pending and run the
-			// ladder again from the top.
-			continue
-		}
-
-		// Run reconnects internally, so returning means a fatal condition: a rejected identity or
-		// a certificate mismatch. Surface it and stop; the user must re-pair or fix the network.
-		var ae *core.AuthError
-		switch {
-		case errors.As(err, &ae):
-			a.setState(StateError, "re-pair required")
-			a.logf("authentication failed: %v", err)
-			a.failPendingDictation("Re-pair required — the phone no longer recognises this desktop")
-		case errors.Is(err, core.ErrPinMismatch):
-			a.setState(StateError, "certificate pin mismatch")
-			a.logf("pin mismatch: %v", err)
-			a.failPendingDictation("Certificate pin mismatch — possible impersonation")
-		default:
-			a.setState(StateError, errString(err))
-			a.logf("link ended: %v", err)
-			a.failPendingDictation("Phone connection ended")
-		}
+		a.logf("discovery failed: %v", err)
+		a.setState(StateOffline, "no phone found")
+		a.failPendingDictation("No phone found — is the phone on this network?")
 		return
+	}
+
+	a.setLastAddr(target)
+
+	client := core.NewClient(core.ClientConfig{
+		Addr:     target,
+		Pin:      pin,
+		Ident:    a.opts.Identity,
+		Creds:    a.credsSnapshot(),
+		Handlers: a.handlers(),
+		Logf:     a.logf,
+	})
+	a.mu.Lock()
+	a.client = client
+	a.mu.Unlock()
+
+	a.logf("connecting to wss://%s%s", target, core.Path)
+	err = client.Run(cctx)
+
+	a.mu.Lock()
+	a.client = nil
+	dictating := a.dictating
+	a.mu.Unlock()
+	if cctx.Err() != nil {
+		return
+	}
+
+	// Run is single-shot now, so returning means either a fatal rejection or a dropped link.
+	var ae *core.AuthError
+	switch {
+	case errors.As(err, &ae):
+		a.setState(StateError, "re-pair required")
+		a.logf("authentication failed: %v", err)
+		a.failPendingDictation("Re-pair required — the phone no longer recognises this desktop")
+	case errors.Is(err, core.ErrPinMismatch):
+		a.setState(StateError, "certificate pin mismatch")
+		a.logf("pin mismatch: %v", err)
+		a.failPendingDictation("Certificate pin mismatch — possible impersonation")
+	default:
+		// The link dropped or never came up. Connect-on-demand: return to Idle and do not chase;
+		// the next hotkey reconnects. A mid-dictation drop gets visible feedback because the user
+		// was watching the pill.
+		a.setState(StateOffline, "idle")
+		a.logf("link ended: %v", err)
+		if dictating {
+			a.setDictating(false)
+			a.showErrorPill("Connection lost")
+			a.signalSmartReset()
+		} else {
+			a.failPendingDictation("Phone connection failed")
+		}
 	}
 }
 
-// resolve returns the address and pin to dial: the manual override when set, else the discovery
-// ladder. full selects the whole ladder (remembered address → short mDNS → subnet sweep); without
-// it only the cheap remembered-address probe runs, so an idle client never multicasts or sweeps.
-func (a *app) resolve(ctx context.Context, hint string, full bool) (addr, pin string, err error) {
+// resolve returns the address and pin to dial: the manual override when set, else the full discovery
+// ladder (remembered address → short mDNS → subnet sweep). The remembered-address rung is the cheap,
+// silent one, so a warm reconnect never multicasts or sweeps.
+func (a *app) resolve(ctx context.Context, hint string) (addr, pin string, err error) {
 	creds := a.credsSnapshot()
 	if a.opts.Addr != "" {
 		pin = a.opts.Pin
@@ -405,14 +383,7 @@ func (a *app) resolve(ctx context.Context, hint string, full bool) (addr, pin st
 		return a.opts.Addr, pin, nil
 	}
 
-	var peer core.Peer
-	if full {
-		peer, err = core.Resolve(ctx, core.ResolveOptions{Hint: hint, Logf: a.logf})
-	} else if hint != "" && core.Reachable(ctx, hint) {
-		peer = core.Peer{Addr: hint, Port: core.DefaultPort, Via: core.ViaHint}
-	} else {
-		err = core.ErrNoPeer
-	}
+	peer, err := core.Resolve(ctx, core.ResolveOptions{Hint: hint, Logf: a.logf})
 	if err != nil {
 		return "", "", err
 	}
@@ -423,43 +394,8 @@ func (a *app) resolve(ctx context.Context, hint string, full bool) (addr, pin st
 	return peer.Addr, pin, nil
 }
 
-// requestFullResolve asks the connect manager to run the full discovery ladder now. It is called
-// only from the hotkey/test path, never on a timer. If a connect attempt is in flight it is
-// cancelled so the manager re-resolves; otherwise the running backoff wait is woken.
-func (a *app) requestFullResolve() {
-	a.mu.Lock()
-	a.resolveFull = true
-	cancel := a.attemptCancel
-	if cancel != nil {
-		a.reResolve = true
-	}
-	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	select {
-	case a.resolveKick <- struct{}{}:
-	default:
-	}
-}
-
-// waitRetry blocks for the reconnect backoff, or until a hotkey asks for an immediate resolve. It
-// returns false when the manager has been cancelled.
-func (a *app) waitRetry(ctx context.Context) bool {
-	t := time.NewTimer(3 * time.Second)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-a.resolveKick:
-		return true
-	case <-t.C:
-		return true
-	}
-}
-
-// setLastAddr remembers the address a successful resolve produced, so the next reconnect (and the
-// next idle retry) can skip mDNS and the sweep.
+// setLastAddr remembers the address a successful resolve produced, so the next on-demand connect can
+// skip mDNS and the sweep.
 func (a *app) setLastAddr(addr string) {
 	a.mu.Lock()
 	if a.settings.LastAddr == addr {
@@ -473,9 +409,9 @@ func (a *app) setLastAddr(addr string) {
 	a.persist(s)
 }
 
-// beginOnDemandDictation shows the pill immediately and asks the connect manager for a link, so a
-// hotkey press never looks dead while the discovery ladder runs. It is called when a dictation is
-// requested but no authenticated link is up.
+// beginOnDemandDictation shows the pill immediately and asks for a link, so a hotkey press never
+// looks dead while the discovery ladder runs. It is called when a dictation is requested but no
+// authenticated link is up.
 func (a *app) beginOnDemandDictation() {
 	a.mu.Lock()
 	a.pending = true
@@ -483,9 +419,8 @@ func (a *app) beginOnDemandDictation() {
 
 	a.showConnectingPill("Connecting…") // respond before any discovery happens
 
-	a.requestFullResolve()
-	// Always attempt to start the manager: connect() dedupes with a.connecting, and its teardown
-	// re-spawns if the pending intent arrived mid-shutdown (closing that race).
+	// connect() dedupes with a.connecting, and its teardown re-spawns if this pending intent arrived
+	// mid-shutdown (closing that race).
 	go a.connect()
 }
 
@@ -1130,9 +1065,8 @@ func (a *app) doPair() {
 	a.setState(StateReady, "paired with "+creds.ServerName)
 	a.refreshPanel()
 	a.logf("paired with %q", creds.ServerName)
-	a.mu.Lock()
-	a.resolveFull = true
-	a.mu.Unlock()
+	// Pairing is a deliberate "connect me" act, so validate it now; after this the link is
+	// connect-on-demand and a drop returns to Idle (D-131).
 	go a.connect()
 }
 
@@ -1304,6 +1238,13 @@ func (a *app) serverName() string {
 	return a.creds.ServerName
 }
 
+// isPaired reports whether stored credentials exist, independent of whether a link is up.
+func (a *app) isPaired() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.paired
+}
+
 // mapConnState maps the transport state to the tray state; the detail string carries the reason.
 func mapConnState(st core.ConnState) TrayState {
 	switch st {
@@ -1323,13 +1264,6 @@ func statusTitle(s TrayState, detail string) string {
 		return stateLabel(s) + " — " + detail
 	}
 	return stateLabel(s)
-}
-
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 // debugLogs reports whether transcript-bearing log lines are allowed: the persisted setting, or a

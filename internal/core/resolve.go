@@ -39,9 +39,9 @@ func Reachable(ctx context.Context, addr string) bool {
 }
 
 // Resolve finds the phone using the on-demand ladder: the remembered address, then a short mDNS
-// browse, then the full-subnet TCP sweep (PROTOCOL.md §2). It is meant to be called only when the
-// user asks for a connection or at startup — never on a timer — so an idle client never scans the
-// network. A negative result is ErrNoPeer, never a dead end.
+// browse, then the full-subnet TCP sweep (PROTOCOL.md §2). It is called only when the user asks for a
+// connection — never on a timer — so an idle client never scans the network. A negative result is
+// ErrNoPeer, never a dead end.
 func Resolve(ctx context.Context, opts ResolveOptions) (Peer, error) {
 	logf := opts.Logf
 	if logf == nil {
