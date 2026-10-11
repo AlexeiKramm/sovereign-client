@@ -362,8 +362,9 @@ func (a *app) connect() {
 	default:
 		// The link dropped or never came up. Connect-on-demand: return to Idle and do not chase;
 		// the next hotkey reconnects. A mid-dictation drop gets visible feedback because the user
-		// was watching the pill.
-		a.setState(StateOffline, "idle")
+		// was watching the pill. No detail: StateOffline already reads "Idle", so a detail here
+		// only produced the redundant "Idle — idle".
+		a.setState(StateOffline, "")
 		a.logf("link ended: %v", err)
 		if dictating {
 			a.setDictating(false)
@@ -568,7 +569,7 @@ func (a *app) handlers() core.Handlers {
 					words = countWords(delivery)
 				}
 				a.refreshPanel()
-				a.inject(delivery)
+				a.inject(delivery + a.utteranceSeparator())
 				a.showInsertedPill(words, delivery)
 			} else {
 				a.hidePill()
@@ -1128,6 +1129,24 @@ func (a *app) setInsertion(m string) {
 	a.mu.Unlock()
 	a.refreshPanel()
 	a.persist(s)
+}
+
+// setSeparator chooses what is appended after each finalized utterance.
+func (a *app) setSeparator(sep string) {
+	a.mu.Lock()
+	a.settings.Separator = sep
+	s := a.settings
+	a.mu.Unlock()
+	a.refreshPanel()
+	a.persist(s)
+}
+
+// utteranceSeparator returns the characters appended after each finalized utterance, per the setting.
+func (a *app) utteranceSeparator() string {
+	a.mu.Lock()
+	sep := a.settings.Separator
+	a.mu.Unlock()
+	return separatorText(sep)
 }
 
 func (a *app) setPosition(p string) {

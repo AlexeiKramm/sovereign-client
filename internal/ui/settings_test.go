@@ -22,6 +22,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 		Mode:                ModeToggle,
 		Hotkey:              "F9",
 		Insertion:           InsertType,
+		Separator:           SepNewline,
 		OverlayPosition:     PosTopLeft,
 		ThemeMode:           ThemeDark,
 		ThemePreset:         "amber",
@@ -82,6 +83,34 @@ func TestSettingsKeepsCustomHotkey(t *testing.T) {
 	}
 	if got.Hotkey != "Ctrl+Alt+J" {
 		t.Fatalf("custom hotkey lost: %q", got.Hotkey)
+	}
+}
+
+// TestSeparatorText pins the mapping from the stored separator name to the characters injected after
+// each finalized utterance, and that an unknown name appends nothing.
+func TestSeparatorText(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{SepNone, ""},
+		{SepSpace, " "},
+		{SepNewline, "\n"},
+		{"", ""},
+		{"bogus", ""},
+	}
+	for _, c := range cases {
+		if got := separatorText(c.name); got != c.want {
+			t.Errorf("separatorText(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSettingsDefaultsSeparator checks the out-of-the-box separator is a space, so consecutive
+// dictations are separated without the user configuring anything.
+func TestSettingsDefaultsSeparator(t *testing.T) {
+	if got := DefaultSettings().Separator; got != SepSpace {
+		t.Fatalf("default separator = %q, want %q", got, SepSpace)
 	}
 }
 

@@ -50,7 +50,7 @@ func newFace(px float64) (font.Face, error) {
 	return opentype.NewFace(f, &opentype.FaceOptions{
 		Size:    px,
 		DPI:     72,
-		Hinting: font.HintingFull,
+		Hinting: font.HintingNone,
 	})
 }
 

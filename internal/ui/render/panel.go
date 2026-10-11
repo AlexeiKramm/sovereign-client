@@ -46,6 +46,7 @@ const (
 	rowSwitchW  = 36.0
 	rowSwitchH  = 20.0
 	rowButtonH  = 36.0
+	rowHeaderH  = 20.0
 	rowGap      = 5.0
 
 	panelInfoSz = 12.0
@@ -114,6 +115,8 @@ const (
 	RowButton
 	// RowDropdown is an expandable dropdown selection row.
 	RowDropdown
+	// RowHeader is an uppercase section header with an optional top hairline divider.
+	RowHeader
 )
 
 // Option is one chip in a RowChips group.
@@ -266,13 +269,12 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		fixedH += 6 * scale
 	}
 
-	// Cap the dictations content to the room the caller allows (the work area) and scroll it, so a
-	// long expanded utterance stays readable instead of running off the screen. The settings tab is
-	// short and keeps its natural height.
+	// Cap the content to the room the caller allows (the work area) and scroll it if it exceeds
+	// available height, so expanded utterances or tall settings lists stay readable and on-screen.
 	visibleH := contentH
 	maxScroll := 0
 	scroll := m.Scroll
-	if m.MaxHeight > 0 && m.ActiveTab == TabDictations && contentH > 0 {
+	if m.MaxHeight > 0 && contentH > 0 {
 		avail := m.MaxHeight - fixedH
 		if minH := 96.0 * scale; avail < minH {
 			avail = minH
@@ -394,9 +396,33 @@ func RenderPanel(m PanelModel) (Panel, error) {
 		}
 	} else {
 		// TabSettings
-		for i, r := range m.Rows {
-			controls = append(controls, drawRow(img, r, left, curY, innerW, rowH[i], 0, scale, theme, labelFace, chipFace, rowFace)...)
-			curY += rowH[i] + rowGap*scale
+		if maxScroll == 0 {
+			y := contentTop
+			for i, r := range m.Rows {
+				controls = append(controls, drawRow(img, r, left, y, innerW, rowH[i], 0, scale, theme, labelFace, chipFace, rowFace, smallFace)...)
+				y += rowH[i] + rowGap*scale
+			}
+		} else {
+			scratch := image.NewRGBA(image.Rect(0, 0, totalW, int(math.Round(contentH))))
+			var listControls []Control
+			y := 0.0
+			for i, r := range m.Rows {
+				listControls = append(listControls, drawRow(scratch, r, left, y, innerW, rowH[i], 0, scale, theme, labelFace, chipFace, rowFace, smallFace)...)
+				y += rowH[i] + rowGap*scale
+			}
+			draw.Draw(img, scrollArea, scratch, image.Point{Y: scroll}, draw.Over)
+			dy := int(math.Round(contentTop)) - scroll
+			for _, c := range listControls {
+				r := c.Rect.Add(image.Pt(0, dy))
+				if r.Min.Y < scrollArea.Min.Y || r.Max.Y > scrollArea.Max.Y {
+					continue
+				}
+				if r.Empty() {
+					continue
+				}
+				c.Rect = r
+				controls = append(controls, c)
+			}
 		}
 	}
 	curY = contentTop + visibleH
@@ -724,6 +750,11 @@ func drawEmptyHistory(img *image.RGBA, x, y, w, h float64, scale float64, theme 
 // measureRow returns the logical height of a row, scaled, wrapping chips onto multiple lines if needed.
 func measureRow(r Row, maxWidth, scale float64, chipFace font.Face) float64 {
 	switch r.Kind {
+	case RowHeader:
+		if r.On {
+			return (rowHeaderH + 12.0) * scale
+		}
+		return rowHeaderH * scale
 	case RowChips:
 		lines := 1
 		cx := 0.0
@@ -756,11 +787,22 @@ func measureRow(r Row, maxWidth, scale float64, chipFace font.Face) float64 {
 
 // drawRow draws one settings row and returns its interactive regions (in image coordinates).
 func drawRow(img *image.RGBA, r Row, x, y, w, h float64, shadow int, scale float64, theme Theme,
-	labelFace, chipFace, rowFace font.Face) []Control {
+	labelFace, chipFace, rowFace, smallFace font.Face) []Control {
 
 	switch r.Kind {
+	case RowHeader:
+		headerH := rowHeaderH * scale
+		textY := y
+		if r.On {
+			divY := y + 5.0*scale
+			fillRoundRect(img, x, divY, w, 1.0, 0, theme.Border)
+			textY = y + 12.0*scale
+		}
+		drawText(img, smallFace, theme.Primary, x+2.0*scale, textY+baseline(smallFace, headerH), strings.ToUpper(r.Text))
+		return nil
+
 	case RowChips:
-		drawTextEmboldened(img, labelFace, theme.OnSurfaceVariant, x, y+baseline(labelFace, rowLabelH*scale), r.Text)
+		drawText(img, labelFace, theme.OnSurfaceVariant, x, y+baseline(labelFace, rowLabelH*scale), r.Text)
 		chipY := y + rowLabelH*scale
 		chH := rowChipsH * scale
 		cx := x

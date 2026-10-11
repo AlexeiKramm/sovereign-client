@@ -129,6 +129,49 @@ func TestRenderPanelRowsControls(t *testing.T) {
 	}
 }
 
+// TestRenderPanelRowHeader pins that section headers render without emitting interactive controls
+// and that subsequent headers with dividers are taller than the first header.
+func TestRenderPanelRowHeader(t *testing.T) {
+	face, err := newFace(13)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer face.Close()
+
+	hFirst := measureRow(Row{Kind: RowHeader, Text: "Voice Dictation", On: false}, 300, 1, face)
+	hWithDiv := measureRow(Row{Kind: RowHeader, Text: "Text Output", On: true}, 300, 1, face)
+	if hWithDiv <= hFirst {
+		t.Fatalf("measureRow with divider = %v, want > first header %v", hWithDiv, hFirst)
+	}
+
+	p, err := RenderPanel(PanelModel{
+		Title:     "Sovereign",
+		Status:    "Ready",
+		ActiveTab: TabSettings,
+		Rows: []Row{
+			{Kind: RowHeader, Text: "Section 1", On: false},
+			{Kind: RowButton, ID: "btn1", Text: "Action 1"},
+			{Kind: RowHeader, Text: "Section 2", On: true},
+			{Kind: RowButton, ID: "btn2", Text: "Action 2"},
+		},
+		Scale: 1,
+	})
+	if err != nil {
+		t.Fatalf("RenderPanel: %v", err)
+	}
+	for _, c := range p.Controls {
+		if c.ID == "Section 1" || c.ID == "Section 2" {
+			t.Fatalf("RowHeader unexpectedly registered as an interactive control: %+v", c)
+		}
+	}
+	if _, ok := controlByID(p, "btn1"); !ok {
+		t.Fatal("btn1 missing from controls")
+	}
+	if _, ok := controlByID(p, "btn2"); !ok {
+		t.Fatal("btn2 missing from controls")
+	}
+}
+
 // TestHistoryCardExpand checks expanding a history card reveals more of the utterance: the card must
 // grow taller than the collapsed 4-line preview.
 func TestHistoryCardExpand(t *testing.T) {
@@ -262,26 +305,29 @@ func TestExportPanelPNG(t *testing.T) {
 		presetOpts[i] = Option{ID: "preset:" + p.ID, Text: p.Name, On: p.ID == "cyan"}
 	}
 	settingsRows := []Row{
+		{Kind: RowHeader, Text: "Voice Dictation", On: false},
 		{Kind: RowChips, Text: "Dictation mode", Options: []Option{
 			{ID: "mode:auto", Text: "Tap or hold", On: true},
 			{ID: "mode:hold", Text: "Hold to talk"},
 			{ID: "mode:toggle", Text: "Press to toggle"},
 		}},
 		{Kind: RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: "Ctrl+Alt+Space"},
+
+		{Kind: RowHeader, Text: "Text Output", On: true},
 		{Kind: RowChips, Text: "Insertion", Options: []Option{
 			{ID: "insertion:paste", Text: "Paste (fast)", On: true},
 			{ID: "insertion:type", Text: "Type"},
 		}},
+		{Kind: RowChips, Text: "After each utterance", Options: []Option{
+			{ID: "separator:space", Text: "Space", On: true},
+		}},
+
+		{Kind: RowHeader, Text: "Floating Pill", On: true},
 		{Kind: RowChips, Text: "Overlay position", Options: []Option{
 			{ID: "position:bottom-right", Text: "Bottom right", On: true},
 			{ID: "position:bottom-left", Text: "Bottom left"},
 			{ID: "position:top-right", Text: "Top right"},
 			{ID: "position:top-left", Text: "Top left"},
-		}},
-		{Kind: RowChips, Text: "Theme", Options: []Option{
-			{ID: "theme:system", Text: "System", On: true},
-			{ID: "theme:dark", Text: "Dark"},
-			{ID: "theme:light", Text: "Light"},
 		}},
 		{Kind: RowChips, Text: "Feedback pill duration", Options: []Option{
 			{ID: "feedback:1", Text: "1s"},
@@ -289,7 +335,16 @@ func TestExportPanelPNG(t *testing.T) {
 			{ID: "feedback:3", Text: "3s"},
 			{ID: "feedback:0", Text: "Off"},
 		}},
+
+		{Kind: RowHeader, Text: "Appearance", On: true},
+		{Kind: RowChips, Text: "Theme", Options: []Option{
+			{ID: "theme:system", Text: "System", On: true},
+			{ID: "theme:dark", Text: "Dark"},
+			{ID: "theme:light", Text: "Light"},
+		}},
 		{Kind: RowDropdown, ID: "dropdown:accent", Text: "Accent color", Detail: "Cyan", Options: presetOpts, On: false},
+
+		{Kind: RowHeader, Text: "System & Connection", On: true},
 		{Kind: RowToggle, ID: "startup", Text: "Start with Windows", On: true},
 		{Kind: RowButton, ID: "unpair", Text: "Unpair…", Detail: "Phone"},
 		{Kind: RowButton, ID: "quit", Text: "Quit Sovereign"},
@@ -366,7 +421,12 @@ func TestExportPanelPNG(t *testing.T) {
 	// 4. Settings with Dropdown Open
 	openRows := make([]Row, len(settingsRows))
 	copy(openRows, settingsRows)
-	openRows[6].On = true
+	for i := range openRows {
+		if openRows[i].ID == "dropdown:accent" {
+			openRows[i].On = true
+			break
+		}
+	}
 	pSettingsOpen, err := RenderPanel(PanelModel{
 		Title:     "Sovereign",
 		Status:    "Ready — Phone",

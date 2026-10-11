@@ -148,35 +148,6 @@ func (a *app) panelRows() []render.Row {
 		hotkey = "Press a key…"
 	}
 
-	rows := []render.Row{
-		{Kind: render.RowChips, Text: "Dictation mode", Options: []render.Option{
-			{ID: "mode:" + ModeAuto, Text: "Tap or hold", On: s.Mode == ModeAuto},
-			{ID: "mode:" + ModeHold, Text: "Hold to talk", On: s.Mode == ModeHold},
-			{ID: "mode:" + ModeToggle, Text: "Press to toggle", On: s.Mode == ModeToggle},
-		}},
-		{Kind: render.RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: hotkey},
-		{Kind: render.RowChips, Text: "Insertion", Options: []render.Option{
-			{ID: "insertion:" + InsertPaste, Text: "Paste (fast)", On: s.Insertion == InsertPaste},
-			{ID: "insertion:" + InsertType, Text: "Type", On: s.Insertion == InsertType},
-		}},
-		{Kind: render.RowChips, Text: "Overlay position", Options: []render.Option{
-			{ID: "position:" + PosBottomRight, Text: "Bottom right", On: s.OverlayPosition == PosBottomRight},
-			{ID: "position:" + PosBottomLeft, Text: "Bottom left", On: s.OverlayPosition == PosBottomLeft},
-			{ID: "position:" + PosTopRight, Text: "Top right", On: s.OverlayPosition == PosTopRight},
-			{ID: "position:" + PosTopLeft, Text: "Top left", On: s.OverlayPosition == PosTopLeft},
-		}},
-		{Kind: render.RowChips, Text: "Theme", Options: []render.Option{
-			{ID: "theme:" + ThemeSystem, Text: "System", On: s.ThemeMode == ThemeSystem || s.ThemeMode == ""},
-			{ID: "theme:" + ThemeDark, Text: "Dark", On: s.ThemeMode == ThemeDark},
-			{ID: "theme:" + ThemeLight, Text: "Light", On: s.ThemeMode == ThemeLight},
-		}},
-		{Kind: render.RowChips, Text: "Feedback pill duration", Options: []render.Option{
-			{ID: "feedback:1", Text: "1s", On: s.FeedbackDurationSec == 1},
-			{ID: "feedback:2", Text: "2s", On: s.FeedbackDurationSec == 2},
-			{ID: "feedback:3", Text: "3s", On: s.FeedbackDurationSec == 3},
-			{ID: "feedback:off", Text: "Off", On: s.FeedbackDurationSec == -1},
-		}},
-	}
 	a.panelMu.Lock()
 	accentOpen := a.accentDropdownOpen
 	a.panelMu.Unlock()
@@ -197,16 +168,65 @@ func (a *app) panelRows() []render.Row {
 			On:   s.ThemePreset == p.ID || (s.ThemePreset == "" && p.ID == DefaultThemePreset),
 		}
 	}
-	rows = append(rows, render.Row{
-		Kind:    render.RowDropdown,
-		ID:      "dropdown:accent",
-		Text:    "Accent color",
-		Detail:  currentPresetName,
-		Options: presetOpts,
-		On:      accentOpen,
-	})
-	rows = append(rows, render.Row{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup})
-	rows = append(rows, render.Row{Kind: render.RowToggle, ID: "debug", Text: "Log transcripts (debug)", On: s.Debug})
+
+	rows := []render.Row{
+		// 1. Voice Dictation
+		{Kind: render.RowHeader, Text: "Voice Dictation", On: false},
+		{Kind: render.RowChips, Text: "Dictation mode", Options: []render.Option{
+			{ID: "mode:" + ModeAuto, Text: "Tap or hold", On: s.Mode == ModeAuto},
+			{ID: "mode:" + ModeHold, Text: "Hold to talk", On: s.Mode == ModeHold},
+			{ID: "mode:" + ModeToggle, Text: "Press to toggle", On: s.Mode == ModeToggle},
+		}},
+		{Kind: render.RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: hotkey},
+
+		// 2. Text Output
+		{Kind: render.RowHeader, Text: "Text Output", On: true},
+		{Kind: render.RowChips, Text: "Insertion", Options: []render.Option{
+			{ID: "insertion:" + InsertPaste, Text: "Paste (fast)", On: s.Insertion == InsertPaste},
+			{ID: "insertion:" + InsertType, Text: "Type", On: s.Insertion == InsertType},
+		}},
+		{Kind: render.RowChips, Text: "After each utterance", Options: []render.Option{
+			{ID: "separator:" + SepNone, Text: "Nothing", On: s.Separator == SepNone},
+			{ID: "separator:" + SepSpace, Text: "Space", On: s.Separator == SepSpace},
+			{ID: "separator:" + SepNewline, Text: "New line", On: s.Separator == SepNewline},
+		}},
+
+		// 3. Floating Pill
+		{Kind: render.RowHeader, Text: "Floating Pill", On: true},
+		{Kind: render.RowChips, Text: "Overlay position", Options: []render.Option{
+			{ID: "position:" + PosBottomRight, Text: "Bottom right", On: s.OverlayPosition == PosBottomRight},
+			{ID: "position:" + PosBottomLeft, Text: "Bottom left", On: s.OverlayPosition == PosBottomLeft},
+			{ID: "position:" + PosTopRight, Text: "Top right", On: s.OverlayPosition == PosTopRight},
+			{ID: "position:" + PosTopLeft, Text: "Top left", On: s.OverlayPosition == PosTopLeft},
+		}},
+		{Kind: render.RowChips, Text: "Feedback pill duration", Options: []render.Option{
+			{ID: "feedback:1", Text: "1s", On: s.FeedbackDurationSec == 1},
+			{ID: "feedback:2", Text: "2s", On: s.FeedbackDurationSec == 2},
+			{ID: "feedback:3", Text: "3s", On: s.FeedbackDurationSec == 3},
+			{ID: "feedback:off", Text: "Off", On: s.FeedbackDurationSec == -1},
+		}},
+
+		// 4. Appearance
+		{Kind: render.RowHeader, Text: "Appearance", On: true},
+		{Kind: render.RowChips, Text: "Theme", Options: []render.Option{
+			{ID: "theme:" + ThemeSystem, Text: "System", On: s.ThemeMode == ThemeSystem || s.ThemeMode == ""},
+			{ID: "theme:" + ThemeDark, Text: "Dark", On: s.ThemeMode == ThemeDark},
+			{ID: "theme:" + ThemeLight, Text: "Light", On: s.ThemeMode == ThemeLight},
+		}},
+		{
+			Kind:    render.RowDropdown,
+			ID:      "dropdown:accent",
+			Text:    "Accent color",
+			Detail:  currentPresetName,
+			Options: presetOpts,
+			On:      accentOpen,
+		},
+
+		// 5. System & Connection
+		{Kind: render.RowHeader, Text: "System & Connection", On: true},
+		{Kind: render.RowToggle, ID: "startup", Text: "Start with Windows", On: startup},
+		{Kind: render.RowToggle, ID: "debug", Text: "Log transcripts (debug)", On: s.Debug},
+	}
 	if paired {
 		rows = append(rows, render.Row{Kind: render.RowButton, ID: "unpair", Text: "Unpair…", Detail: server})
 	} else {
@@ -577,6 +597,8 @@ func (a *app) panelAction(c render.Control) {
 		a.setMode(strings.TrimPrefix(c.ID, "mode:"))
 	case strings.HasPrefix(c.ID, "insertion:"):
 		a.setInsertion(strings.TrimPrefix(c.ID, "insertion:"))
+	case strings.HasPrefix(c.ID, "separator:"):
+		a.setSeparator(strings.TrimPrefix(c.ID, "separator:"))
 	case strings.HasPrefix(c.ID, "position:"):
 		a.setPosition(strings.TrimPrefix(c.ID, "position:"))
 	case strings.HasPrefix(c.ID, "theme:"):

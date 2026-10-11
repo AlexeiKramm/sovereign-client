@@ -27,6 +27,18 @@ const (
 	InsertType = "type"
 )
 
+// Post-utterance separators appended after each finalized block, so two consecutive dictations are
+// not glued together at the cursor. The stored value is a short name; separatorText maps it to the
+// characters actually injected.
+const (
+	// SepNone appends nothing (the historical behaviour).
+	SepNone = "none"
+	// SepSpace appends a single space — the default, so consecutive prose utterances stay separate.
+	SepSpace = "space"
+	// SepNewline appends a line feed, for lists and notes where each utterance is its own line.
+	SepNewline = "newline"
+)
+
 // Overlay anchor positions (consumed by the pill overlay). The user picks one from the tray.
 const (
 	PosBottomRight = "bottom-right"
@@ -51,6 +63,7 @@ const DefaultThemePreset = "cyan"
 var (
 	dictationModes   = []string{ModeAuto, ModeHold, ModeToggle}
 	insertions       = []string{InsertPaste, InsertType}
+	separators       = []string{SepNone, SepSpace, SepNewline}
 	overlayPositions = []string{PosBottomRight, PosBottomLeft, PosTopRight, PosTopLeft}
 	themeModes       = []string{ThemeSystem, ThemeDark, ThemeLight}
 	themePresets     = []string{"cyan", "sky", "slate", "teal", "amber", "orange", "blue", "green", "coral", "lilac", "mint"}
@@ -62,6 +75,7 @@ type Settings struct {
 	Mode                string `json:"mode"`
 	Hotkey              string `json:"hotkey"`
 	Insertion           string `json:"insertion"`
+	Separator           string `json:"separator"` // appended after each finalized utterance; SepNone/SepSpace/SepNewline
 	OverlayPosition     string `json:"overlayPosition"`
 	ThemeMode           string `json:"themeMode"`
 	ThemePreset         string `json:"themePreset"`
@@ -82,6 +96,7 @@ func DefaultSettings() Settings {
 		Mode:                ModeAuto,
 		Hotkey:              DefaultHotkey,
 		Insertion:           InsertPaste,
+		Separator:           SepSpace,
 		OverlayPosition:     PosBottomRight,
 		ThemeMode:           ThemeSystem,
 		ThemePreset:         DefaultThemePreset,
@@ -98,6 +113,9 @@ func (s *Settings) Normalize() {
 	}
 	if !contains(insertions, s.Insertion) {
 		s.Insertion = InsertPaste
+	}
+	if !contains(separators, s.Separator) {
+		s.Separator = SepSpace
 	}
 	if !contains(overlayPositions, s.OverlayPosition) {
 		s.OverlayPosition = PosBottomRight
@@ -155,4 +173,17 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// separatorText maps a stored separator name to the characters appended after a finalized utterance.
+// An unknown or empty name appends nothing, so a hand-edited settings file can never inject surprises.
+func separatorText(name string) string {
+	switch name {
+	case SepSpace:
+		return " "
+	case SepNewline:
+		return "\n"
+	default:
+		return ""
+	}
 }

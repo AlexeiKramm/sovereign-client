@@ -97,6 +97,10 @@ func TestPanelActionUpdatesSettings(t *testing.T) {
 	if a.settings.Insertion != InsertType {
 		t.Fatalf("insertion = %q, want %q", a.settings.Insertion, InsertType)
 	}
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "separator:" + SepNewline})
+	if a.settings.Separator != SepNewline {
+		t.Fatalf("separator = %q, want %q", a.settings.Separator, SepNewline)
+	}
 	a.panelAction(render.Control{Kind: render.ControlChip, ID: "position:" + PosTopLeft})
 	if a.settings.OverlayPosition != PosTopLeft {
 		t.Fatalf("position = %q, want %q", a.settings.OverlayPosition, PosTopLeft)

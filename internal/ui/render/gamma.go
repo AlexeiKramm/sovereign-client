@@ -113,11 +113,7 @@ func drawTextOptions(img *image.RGBA, face font.Face, col color.RGBA, dot fixed.
 			continue
 		}
 
-		clip := dr
-		if bold {
-			clip.Max.X += 1
-		}
-		clip = clip.Intersect(bounds)
+		clip := dr.Intersect(bounds)
 		if !clip.Empty() {
 			alphaMask, isAlpha := mask.(*image.Alpha)
 
@@ -140,10 +136,9 @@ func drawTextOptions(img *image.RGBA, face font.Face, col color.RGBA, dot fixed.
 				for x := clip.Min.X; x < clip.Max.X; x++ {
 					raw := getAlpha(x, y)
 					if bold {
-						rawShift := getAlpha(x-1, y)
-						if rawShift > raw {
-							raw = rawShift
-						}
+						// Isotropic optical stem enhancement: boosts anti-aliased edge values
+						// symmetrically across curves and diagonals without asymmetric 1px pixel-shift staircasing.
+						raw = float32(math.Pow(float64(raw), 0.70))
 					}
 
 					if raw <= 0.02 {
@@ -165,11 +160,14 @@ func drawTextOptions(img *image.RGBA, face font.Face, col color.RGBA, dot fixed.
 						// Polarity-aware coverage:
 						// - Light text on darker background: apply gentle optical compensation (stem boost)
 						//   to counteract optical thinning caused by background halation.
-						// - Dark text on light/bright background (e.g. cyan chip, light theme): do NOT
-						//   boost coverage, as ink spreading bloats stems and closes small counters.
+						// - Dark text on light/bright background (e.g. cyan chip, light theme): counteract
+						//   gamma-bleaching so anti-aliased edge pixels retain perceptual contrast and
+						//   do not wash out into the bright background.
 						cov := raw * srcAlphaF
 						if srcLum >= dstLum {
 							cov = float32(math.Pow(float64(raw), 0.82)) * srcAlphaF
+						} else {
+							cov = float32(math.Pow(float64(raw), 0.75)) * srcAlphaF
 						}
 						if cov > 1.0 {
 							cov = 1.0
@@ -214,6 +212,8 @@ func drawTextOptions(img *image.RGBA, face font.Face, col color.RGBA, dot fixed.
 						cov := raw * srcAlphaF
 						if srcLum >= dstLum {
 							cov = float32(math.Pow(float64(raw), 0.82)) * srcAlphaF
+						} else {
+							cov = float32(math.Pow(float64(raw), 0.75)) * srcAlphaF
 						}
 						if cov > 1.0 {
 							cov = 1.0

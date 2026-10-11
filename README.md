@@ -86,9 +86,9 @@ the phone's advertised availability while it is open.
 menu) — systray reports a single tap, not a double-click. It shows the same live transcript in a
 larger, focusable window plus the connection status, the last utterance's ASR/cleanup timings, the
 link RTT and a session counter — and it is where every setting lives: dictation mode, **Set custom
-hotkey…** (press the combination you want), insertion method, overlay position, **Start with
-Windows**, pair/unpair, and **Quit**. Drag it by its header; close it with the × or Esc. Closing it
-leaves the tray running.
+hotkey…** (press the combination you want), insertion method, post-utterance separator, overlay
+position, **Start with Windows**, pair/unpair, and **Quit**. Drag it by its header; close it with the
+× or Esc. Closing it leaves the tray running.
 
 The finished block is inserted at the cursor of the window you started in. Insertion defaults to
 **paste** — one Ctrl+V, fast and atomic at any length — with the clipboard restored afterwards; set
@@ -96,6 +96,11 @@ The finished block is inserted at the cursor of the window you started in. Inser
 you pick, the other is tried as a fallback so text is never dropped, and if the target window lost
 focus since you started, nothing is written and the tray reports it. Typing is N synthetic
 keystrokes, so it is **not** a single undo step.
+
+Consecutive dictations would otherwise land with nothing between them, so **After each utterance**
+appends a separator once a block is finalized: a single **Space** by default, **New line** to give
+each utterance its own line, or **Nothing** to leave the cursor exactly where the block ended. The
+separator is only added to the injected text; the transcript history stays unmodified.
 
 The `-ldflags "-s -w -H=windowsgui"` build has no console; diagnostics go to
 `%LOCALAPPDATA%\Sovereign\sovereign-client.log`.
