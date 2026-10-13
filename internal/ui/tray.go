@@ -293,7 +293,7 @@ func (a *app) connect() {
 	a.connecting = true
 	cctx, ccancel := context.WithCancel(a.ctx)
 	a.connCancel = ccancel
-	hint := a.settings.LastAddr
+	hints := a.settings.KnownAddresses()
 	a.mu.Unlock()
 
 	defer func() {
@@ -312,7 +312,7 @@ func (a *app) connect() {
 
 	// Connect-on-demand always runs the full ladder. Its first rung is the cheap, silent
 	// remembered-address probe, so a warm reconnect still skips mDNS and the subnet sweep.
-	target, pin, err := a.resolve(cctx, hint)
+	target, pin, err := a.resolve(cctx, hints...)
 	if err != nil {
 		if cctx.Err() != nil {
 			return
@@ -377,9 +377,9 @@ func (a *app) connect() {
 }
 
 // resolve returns the address and pin to dial: the manual override when set, else the full discovery
-// ladder (remembered address → short mDNS → subnet sweep). The remembered-address rung is the cheap,
+// ladder (remembered addresses → short mDNS → subnet sweep). The remembered-address rung is the cheap,
 // silent one, so a warm reconnect never multicasts or sweeps.
-func (a *app) resolve(ctx context.Context, hint string) (addr, pin string, err error) {
+func (a *app) resolve(ctx context.Context, hints ...string) (addr, pin string, err error) {
 	creds := a.credsSnapshot()
 	if a.opts.Addr != "" {
 		pin = a.opts.Pin
@@ -389,7 +389,7 @@ func (a *app) resolve(ctx context.Context, hint string) (addr, pin string, err e
 		return a.opts.Addr, pin, nil
 	}
 
-	peer, err := core.Resolve(ctx, core.ResolveOptions{Hint: hint, Logf: a.logf})
+	peer, err := core.Resolve(ctx, core.ResolveOptions{Hints: hints, Logf: a.logf})
 	if err != nil {
 		return "", "", err
 	}
@@ -404,14 +404,16 @@ func (a *app) resolve(ctx context.Context, hint string) (addr, pin string, err e
 // skip mDNS and the sweep.
 func (a *app) setLastAddr(addr string) {
 	a.mu.Lock()
-	if a.settings.LastAddr == addr {
+	oldLast := a.settings.LastAddr
+	oldKnown := a.settings.KnownAddrs
+	a.settings.AddKnownAddr(addr)
+	if a.settings.LastAddr == oldLast && a.settings.KnownAddrs == oldKnown {
 		a.mu.Unlock()
 		return
 	}
-	a.settings.LastAddr = addr
 	s := a.settings
 	a.mu.Unlock()
-	a.logf("remembered phone address %s", addr)
+	a.logf("remembered phone address %s (known: %v)", addr, s.KnownAddresses())
 	a.persist(s)
 }
 

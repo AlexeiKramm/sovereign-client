@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
@@ -88,6 +89,55 @@ type Settings struct {
 	// sweep. Empty until the first connect. It is stored here because it is non-secret and already
 	// travels with the same atomic-ish save as the rest of the settings.
 	LastAddr string `json:"lastAddr,omitempty"`
+	// KnownAddrs holds recently successful host:ports (comma-separated, up to 4), probed concurrently
+	// on the hint rung so switching between 5 GHz and 2.4 GHz (or different Wi-Fi networks) is instantaneous.
+	KnownAddrs string `json:"knownAddrs,omitempty"`
+}
+
+// KnownAddresses returns the list of known phone addresses, with LastAddr guaranteed first.
+func (s Settings) KnownAddresses() []string {
+	var addrs []string
+	seen := make(map[string]bool)
+	last := strings.TrimSpace(s.LastAddr)
+	if last != "" {
+		seen[last] = true
+		addrs = append(addrs, last)
+	}
+	if s.KnownAddrs != "" {
+		for _, part := range strings.Split(s.KnownAddrs, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" && !seen[part] {
+				seen[part] = true
+				addrs = append(addrs, part)
+				if len(addrs) >= 4 {
+					break
+				}
+			}
+		}
+	}
+	return addrs
+}
+
+// AddKnownAddr prepends addr to KnownAddrs (most recent first, up to 4), updating LastAddr.
+func (s *Settings) AddKnownAddr(addr string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	existing := s.KnownAddresses()
+	s.LastAddr = addr
+	list := []string{addr}
+	seen := map[string]bool{addr: true}
+	for _, a := range existing {
+		if !seen[a] {
+			seen[a] = true
+			list = append(list, a)
+			if len(list) >= 4 {
+				break
+			}
+		}
+	}
+	s.KnownAddrs = strings.Join(list, ", ")
 }
 
 // DefaultSettings is the configuration used before the user changes anything.
@@ -133,6 +183,16 @@ func (s *Settings) Normalize() {
 	}
 	if _, err := iface.ParseHotkey(s.Hotkey); err != nil {
 		s.Hotkey = DefaultHotkey
+	}
+	if s.KnownAddrs != "" || s.LastAddr != "" {
+		addrs := s.KnownAddresses()
+		if len(addrs) > 0 {
+			s.LastAddr = addrs[0]
+			s.KnownAddrs = strings.Join(addrs, ", ")
+		} else {
+			s.LastAddr = ""
+			s.KnownAddrs = ""
+		}
 	}
 }
 

@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	// probePerHostTimeout bounds one TCP connect during a scan.
-	probePerHostTimeout = 350 * time.Millisecond
+	// probePerHostTimeout bounds one TCP connect during a scan. 750ms ensures uncached ARP resolution
+	// and Wi-Fi power-save (802.11 DTIM) wakeup on 2.4 GHz have sufficient headroom to complete.
+	probePerHostTimeout = 750 * time.Millisecond
 	// probeConcurrency caps simultaneous connects: fast on a /24, but not abusive.
-	probeConcurrency = 64
+	probeConcurrency = 128
 	// probeMaxHosts caps the total number of addresses scanned.
 	probeMaxHosts = 2048
 )

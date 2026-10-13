@@ -160,3 +160,84 @@ func TestSaveSettingsNormalizesBeforeWriting(t *testing.T) {
 		t.Fatalf("empty settings: got %+v, want %+v", got, DefaultSettings())
 	}
 }
+
+func TestSettingsKnownAddresses(t *testing.T) {
+	s := DefaultSettings()
+	s.AddKnownAddr("192.168.1.51:8765")
+	if len(s.KnownAddresses()) != 1 || s.KnownAddresses()[0] != "192.168.1.51:8765" {
+		t.Fatalf("KnownAddresses = %v", s.KnownAddresses())
+	}
+
+	// Add second address (e.g. 2.4 GHz IP)
+	s.AddKnownAddr("192.168.1.50:8765")
+	addrs := s.KnownAddresses()
+	if len(addrs) != 2 || addrs[0] != "192.168.1.50:8765" || addrs[1] != "192.168.1.51:8765" {
+		t.Fatalf("KnownAddresses after second addr = %v", addrs)
+	}
+	if s.LastAddr != "192.168.1.50:8765" {
+		t.Fatalf("LastAddr = %q", s.LastAddr)
+	}
+
+	// Re-adding existing moves it to the front
+	s.AddKnownAddr("192.168.1.51:8765")
+	addrs = s.KnownAddresses()
+	if len(addrs) != 2 || addrs[0] != "192.168.1.51:8765" || addrs[1] != "192.168.1.50:8765" {
+		t.Fatalf("KnownAddresses after re-add = %v", addrs)
+	}
+
+	// Persist and reload
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := SaveSettings(path, s); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	loaded, err := LoadSettings(path)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if loaded.LastAddr != s.LastAddr || loaded.KnownAddrs != s.KnownAddrs {
+		t.Fatalf("loaded = %+v, want %+v", loaded, s)
+	}
+}
+
+func TestSettingsKnownAddressesCap(t *testing.T) {
+	s := DefaultSettings()
+	s.AddKnownAddr("10.0.0.1:8765")
+	s.AddKnownAddr("10.0.0.2:8765")
+	s.AddKnownAddr("10.0.0.3:8765")
+	s.AddKnownAddr("10.0.0.4:8765")
+	s.AddKnownAddr("10.0.0.5:8765") // 5th address should push out the oldest (10.0.0.1)
+
+	addrs := s.KnownAddresses()
+	if len(addrs) != 4 {
+		t.Fatalf("len(addrs) = %d, want 4", len(addrs))
+	}
+	want := []string{"10.0.0.5:8765", "10.0.0.4:8765", "10.0.0.3:8765", "10.0.0.2:8765"}
+	for i, w := range want {
+		if addrs[i] != w {
+			t.Errorf("addrs[%d] = %q, want %q", i, addrs[i], w)
+		}
+	}
+}
+
+func TestSettingsNormalizeLegacyAndDirtyAddrs(t *testing.T) {
+	// Case 1: Legacy upgrade where only LastAddr is set
+	s1 := DefaultSettings()
+	s1.LastAddr = "192.168.1.10:8765"
+	s1.KnownAddrs = ""
+	s1.Normalize()
+	if s1.KnownAddrs != "192.168.1.10:8765" || s1.LastAddr != "192.168.1.10:8765" {
+		t.Fatalf("Normalize legacy: LastAddr=%q KnownAddrs=%q", s1.LastAddr, s1.KnownAddrs)
+	}
+
+	// Case 2: Dirty whitespace & duplicates
+	s2 := DefaultSettings()
+	s2.LastAddr = " 192.168.1.10:8765 "
+	s2.KnownAddrs = " 192.168.1.10:8765 , 192.168.1.20:8765 , 192.168.1.20:8765 , "
+	s2.Normalize()
+	if s2.LastAddr != "192.168.1.10:8765" {
+		t.Errorf("Normalize dirty: LastAddr=%q", s2.LastAddr)
+	}
+	if s2.KnownAddrs != "192.168.1.10:8765, 192.168.1.20:8765" {
+		t.Errorf("Normalize dirty: KnownAddrs=%q", s2.KnownAddrs)
+	}
+}
