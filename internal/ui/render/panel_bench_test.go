@@ -32,7 +32,7 @@ func BenchmarkRenderPanelFull(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := RenderPanel(PanelModel{
 			Title: "Sovereign", Status: "Ready — Phone", ActiveTab: TabDictations,
-			History: benchHistory(), Rows: rows, Version: "v0.9.4", Dark: true, Preset: "cyan", Scale: 1,
+			History: benchHistory(), Rows: rows, Version: "v0.1.0", Dark: true, Preset: "cyan", Scale: 1,
 		}); err != nil {
 			b.Fatal(err)
 		}
@@ -84,7 +84,7 @@ func BenchmarkRenderPanelSettings(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := RenderPanel(PanelModel{
 			Title: "Sovereign", Status: "Ready — Phone", ActiveTab: TabSettings,
-			Rows: rows, Version: "v0.9.4", Dark: true, Preset: "cyan", Scale: 1,
+			Rows: rows, Version: "v0.1.0", Dark: true, Preset: "cyan", Scale: 1,
 		}); err != nil {
 			b.Fatal(err)
 		}

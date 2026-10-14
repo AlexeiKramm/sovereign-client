@@ -289,7 +289,7 @@ func (a *app) repaintPanel() {
 		CopiedID:    copiedID,
 		Rows:        a.panelRows(),
 		Info:        a.panelInfo(),
-		Version:     "v0.9.4",
+		Version:     "v0.1.0",
 		Error:       view.err,
 		Dark:        dark,
 		Preset:      a.themePreset(),

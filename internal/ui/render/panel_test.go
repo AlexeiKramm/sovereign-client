@@ -70,7 +70,7 @@ func TestRenderPanelTallerWithVersion(t *testing.T) {
 	more, err := RenderPanel(PanelModel{
 		Title:   "Sovereign",
 		Status:  "Ready",
-		Version: "v0.9.4",
+		Version:   "v0.1.0",
 		Scale:   1,
 	})
 	if err != nil {
@@ -380,7 +380,7 @@ func TestExportPanelPNG(t *testing.T) {
 		ActiveTab: TabDictations,
 		History:   sampleHistory,
 		Rows:      settingsRows,
-		Version:   "v0.9.4",
+		Version:   "v0.1.0",
 		Dark:      true,
 		Scale:     1,
 	})
@@ -395,7 +395,7 @@ func TestExportPanelPNG(t *testing.T) {
 		ActiveTab: TabDictations,
 		History:   sampleHistory,
 		Rows:      settingsRows,
-		Version:   "v0.9.4",
+		Version:   "v0.1.0",
 		Dark:      false,
 		Scale:     1,
 	})
@@ -410,7 +410,7 @@ func TestExportPanelPNG(t *testing.T) {
 		ActiveTab: TabSettings,
 		History:   sampleHistory,
 		Rows:      settingsRows,
-		Version:   "v0.9.4",
+		Version:   "v0.1.0",
 		Dark:      true,
 		Scale:     1,
 	})
@@ -433,7 +433,7 @@ func TestExportPanelPNG(t *testing.T) {
 		ActiveTab: TabSettings,
 		History:   sampleHistory,
 		Rows:      openRows,
-		Version:   "v0.9.4",
+		Version:   "v0.1.0",
 		Dark:      true,
 		Scale:     1,
 	})
