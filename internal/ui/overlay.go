@@ -31,8 +31,8 @@ const pillMargin = 24.0
 // processingDotStep is how long each processing dot stays active, matching the phone's CleaningDots.
 const processingDotStep = 420 * time.Millisecond
 
-// Animation timings, chosen from docs/pill-animation-lab.html: a snappy fade-in that leads with the
-// content and a gentler fade-out (Balanced), and a short in-place crossfade between discrete states.
+// Animation timings (Balanced): a snappy fade-in that leads with the content and a gentler
+// fade-out, plus a short in-place crossfade between discrete states.
 // All three animate on a ~16 ms step.
 const (
 	fadeInDuration    = 120 * time.Millisecond
