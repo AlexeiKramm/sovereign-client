@@ -44,7 +44,7 @@ flowchart LR
 
 ### 2. Quick Setup
 
-1. **Start the Phone Server:** On your phone, open Sovereign, go to **Settings → Desktop Server**, and enable the server.
+1. **Start the Phone Server:** On your phone, open Sovereign, go to the **Home** tab, and tap the **Desktop Server** row to enable the server.
 2. **Download the Desktop Client:** Grab the latest `sovereign-client.exe` from the [Releases page](https://github.com/AlexeiKramm/sovereign-client/releases/latest).
 3. **Run and Pair:**
    - Launch `sovereign-client.exe`. It starts in your Windows system tray.
@@ -77,7 +77,7 @@ Diagnostics and logs are written to `%LOCALAPPDATA%\Sovereign\sovereign-client.l
 
 ## Build from Source
 
-Requires Go 1.22+ on Windows:
+Requires Go 1.27+ on Windows:
 
 ```powershell
 # Clone the repository
