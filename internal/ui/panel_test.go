@@ -9,8 +9,8 @@ import (
 	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
 )
 
-// TestPanelInfoEmpty pins that the footer no longer shows session/timing stats since each history
-// card displays its own ASR and LLM processing times.
+// TestPanelInfoEmpty pins that the footer no longer shows session/timing stats (the footer
+// only displays the version number).
 func TestPanelInfoEmpty(t *testing.T) {
 	a := &app{}
 	a.sessionCount = 2
@@ -308,5 +308,28 @@ func TestComputePanelPosUserMovedExpandsAwayFromScreenEdge(t *testing.T) {
 	}
 	if expandedPos[1] != 260 {
 		t.Errorf("expected y=260, got %d", expandedPos[1])
+	}
+}
+
+// TestRecordCommittedAccumulatesPerf verifies that per-commit perf measurements are accumulated
+// across multiple commits and that trailing zero-delta commits (such as punctuation finalization)
+// do not clobber the utterance's total timings.
+func TestRecordCommittedAccumulatesPerf(t *testing.T) {
+	a := &app{}
+	a.recordCommitted(core.CommitPerf{AsrMs: 1200, CleanupMs: 650})
+	if a.lastAsrMs != 1200 || a.lastCleanupMs != 650 {
+		t.Fatalf("first commit: got asr=%d cleanup=%d, want 1200, 650", a.lastAsrMs, a.lastCleanupMs)
+	}
+
+	// Second commit delta
+	a.recordCommitted(core.CommitPerf{AsrMs: 300, CleanupMs: 150})
+	if a.lastAsrMs != 1500 || a.lastCleanupMs != 800 {
+		t.Fatalf("second commit: got asr=%d cleanup=%d, want 1500, 800", a.lastAsrMs, a.lastCleanupMs)
+	}
+
+	// Trailing zero commit (e.g. punctuation normalization)
+	a.recordCommitted(core.CommitPerf{AsrMs: 0, CleanupMs: 0})
+	if a.lastAsrMs != 1500 || a.lastCleanupMs != 800 {
+		t.Fatalf("trailing zero commit: got asr=%d cleanup=%d, want 1500, 800", a.lastAsrMs, a.lastCleanupMs)
 	}
 }

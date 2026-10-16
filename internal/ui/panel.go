@@ -385,9 +385,7 @@ func computePanelPos(work winplat.Rect, cw, ch int, dpi int, userMoved bool, las
 	return pos
 }
 
-// panelInfo builds the footer lines: the phone's advertised availability, the last utterance's
-// panelInfo returns nil: the panel footer only displays the version number now that
-// each history entry shows its own ASR and cleanup timings.
+// panelInfo returns nil: the panel footer only displays the version number.
 func (a *app) panelInfo() []string {
 	return nil
 }
@@ -729,10 +727,11 @@ func (a *app) setLiveError(err bool) {
 	a.updatePanel(func(v *panelView) { v.err = err })
 }
 
-// recordCommitted keeps the last utterance's timings for the panel footer.
+// recordCommitted accumulates the utterance's timings from per-commit perf frames.
 func (a *app) recordCommitted(perf core.CommitPerf) {
 	a.mu.Lock()
-	a.lastAsrMs, a.lastCleanupMs = perf.AsrMs, perf.CleanupMs
+	a.lastAsrMs += perf.AsrMs
+	a.lastCleanupMs += perf.CleanupMs
 	a.mu.Unlock()
 	a.refreshPanel()
 }

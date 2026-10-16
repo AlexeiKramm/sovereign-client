@@ -501,6 +501,10 @@ func (a *app) handlers() core.Handlers {
 			a.startPendingDictation()
 		},
 		OnStarted: func(sessionID string) {
+			a.mu.Lock()
+			a.lastAsrMs = 0
+			a.lastCleanupMs = 0
+			a.mu.Unlock()
 			a.setDictating(true)
 			a.setState(StateDictating, "listening")
 			a.startPill()

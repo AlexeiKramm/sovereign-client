@@ -564,7 +564,7 @@ func clampHistoryLines(lines [][]word, expanded bool) [][]word {
 	return lines
 }
 
-// drawHistoryItem draws one elevated card with timestamp, view toggle, copy button, text, and telemetry.
+// drawHistoryItem draws one elevated card with timestamp, view toggle, copy button, text, and word count.
 func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64, scale float64, theme Theme, isCopied bool,
 	bodyFace, chipFace, smallFace font.Face) []Control {
 
@@ -657,11 +657,9 @@ func drawHistoryItem(img *image.RGBA, item PanelHistoryItem, x, y, w, h float64,
 		}
 	}
 
-	// Bottom telemetry bar:
+	// Bottom bar: word count
 	botY := bodyTop + float64(len(lines))*lineH + 8.0*scale
 	botH := 16.0 * scale
-	telemetry := fmt.Sprintf("ASR %dms · LLM %dms", item.AsrMs, item.CleanupMs)
-	drawText(img, smallFace, theme.OnSurfaceVariant, x+innerPad, botY+baseline(smallFace, botH), telemetry)
 
 	wordsStr := fmt.Sprintf("%d words", item.Words)
 	if item.Words == 1 {
