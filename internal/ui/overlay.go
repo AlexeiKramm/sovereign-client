@@ -181,6 +181,9 @@ func (a *app) closePill() {
 	a.pillMu.Lock()
 	a.pill.shown = false
 	a.pill.processing = false
+	a.pillAlpha = 0
+	a.fadeGen++
+	a.xfadeGen++
 	w := a.escWatcher
 	a.escWatcher = nil
 	ov := a.overlay
@@ -320,51 +323,6 @@ func (a *app) fadeOutPill() {
 	a.fadePillTo(0, fadeOutDuration)
 }
 
-// fadePillTo animates the whole-frame alpha toward target over dur, repainting each ~16 ms step, and
-// hides the window when it reaches zero. Every call bumps a generation, so a newer fade (e.g. the pill
-// is shown again mid-fade-out) stops the older one.
-func (a *app) fadePillTo(target int, dur time.Duration) {
-	a.pillMu.Lock()
-	start := a.pillAlpha
-	a.fadeGen++
-	a.xfadeGen++ // a fade cancels any in-flight state crossfade
-	gen := a.fadeGen
-	a.pillMu.Unlock()
-
-	if start == target {
-		if target == 0 {
-			a.hideOverlayNow()
-		}
-		return
-	}
-
-	steps := int(dur / fadeStep)
-	if steps < 1 {
-		steps = 1
-	}
-	delta := target - start
-	for i := 1; i <= steps; i++ {
-		frac := float64(i) / float64(steps)
-		val := start + int(math.Round(float64(delta)*frac))
-		delay := time.Duration(float64(dur) * frac)
-		time.AfterFunc(delay, func() {
-			a.pillMu.Lock()
-			if a.fadeGen != gen {
-				a.pillMu.Unlock()
-				return
-			}
-			shown := a.pill.shown
-			a.pillAlpha = val
-			a.pillMu.Unlock()
-			if val == 0 && !shown {
-				a.hideOverlayNow()
-				return
-			}
-			a.repaintPill()
-		})
-	}
-}
-
 // hideOverlayNow zeroes the alpha and hides the window immediately.
 func (a *app) hideOverlayNow() {
 	a.pillMu.Lock()
@@ -374,6 +332,67 @@ func (a *app) hideOverlayNow() {
 	if ov != nil {
 		ov.Hide()
 	}
+}
+
+// fadePillTo animates the whole-frame alpha toward target over dur on a sequential ~16 ms ticker,
+// and hides the window when it reaches zero. Sequential execution ensures earlier alpha steps can
+// never execute after the final step (preventing the pill from getting stuck half-transparent).
+// Every call bumps a generation, so a newer fade stops any in-flight fade.
+func (a *app) fadePillTo(target int, dur time.Duration) {
+	a.pillMu.Lock()
+	start := a.pillAlpha
+	a.fadeGen++
+	a.xfadeGen++ // a fade cancels any in-flight state crossfade
+	gen := a.fadeGen
+	a.pillMu.Unlock()
+
+	if dur <= 0 || start == target {
+		a.pillMu.Lock()
+		a.pillAlpha = target
+		shown := a.pill.shown
+		a.pillMu.Unlock()
+		if target == 0 && !shown {
+			a.hideOverlayNow()
+		} else {
+			a.repaintPill()
+		}
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(fadeStep)
+		defer ticker.Stop()
+		startTime := time.Now()
+		for range ticker.C {
+			elapsed := time.Since(startTime)
+			frac := float64(elapsed) / float64(dur)
+			if frac >= 1.0 {
+				a.pillMu.Lock()
+				if a.fadeGen != gen {
+					a.pillMu.Unlock()
+					return
+				}
+				shown := a.pill.shown
+				a.pillAlpha = target
+				a.pillMu.Unlock()
+				if target == 0 && !shown {
+					a.hideOverlayNow()
+					return
+				}
+				a.repaintPill()
+				return
+			}
+			val := start + int(math.Round(float64(target-start)*frac))
+			a.pillMu.Lock()
+			if a.fadeGen != gen {
+				a.pillMu.Unlock()
+				return
+			}
+			a.pillAlpha = val
+			a.pillMu.Unlock()
+			a.repaintPill()
+		}
+	}()
 }
 
 // repaintPill renders the current view and hands the bitmap to the window at the current alpha. The
@@ -397,8 +416,8 @@ func (a *app) repaintPill() {
 }
 
 // crossfadePill renders the current view and, when it differs from the last presented frame, dissolves
-// from the old to the new over crossfadeDuration. It is the discrete-state-change path (listening /
-// warming / finishing / inserted / error), never the streaming-text or dot-tick path.
+// from the old to the new over crossfadeDuration on a sequential ~16 ms ticker. It is the discrete-state-change
+// path (listening / warming / finishing / inserted / error), never the streaming-text or dot-tick path.
 func (a *app) crossfadePill() {
 	a.pillMu.Lock()
 	view := a.pill
@@ -408,7 +427,7 @@ func (a *app) crossfadePill() {
 	a.xfadeGen++
 	gen := a.xfadeGen
 	a.pillMu.Unlock()
-	if ov == nil || (!view.shown && alpha == 0) {
+	if ov == nil || !view.shown || alpha == 0 {
 		return
 	}
 	frame, x, y, ok := a.renderPillFrame(view)
@@ -416,22 +435,35 @@ func (a *app) crossfadePill() {
 		return
 	}
 	a.cachePillFrame(frame.Img)
-	if alpha == 0 || from == nil || from.Bounds() != frame.Img.Bounds() || bytes.Equal(from.Pix, frame.Img.Pix) {
+	if from == nil || from.Bounds() != frame.Img.Bounds() || bytes.Equal(from.Pix, frame.Img.Pix) {
 		ov.PresentAlpha(frame.Img, x, y, uint8(alpha))
 		return
 	}
 
-	steps := int(crossfadeDuration / fadeStep)
-	if steps < 1 {
-		steps = 1
-	}
-	for i := 1; i <= steps; i++ {
-		t := float64(i) / float64(steps)
-		delay := time.Duration(float64(crossfadeDuration) * t)
-		blended := blendImages(from, frame.Img, t)
-		time.AfterFunc(delay, func() {
+	go func() {
+		ticker := time.NewTicker(fadeStep)
+		defer ticker.Stop()
+		startTime := time.Now()
+		for range ticker.C {
+			elapsed := time.Since(startTime)
+			frac := float64(elapsed) / float64(crossfadeDuration)
+			if frac >= 1.0 {
+				a.pillMu.Lock()
+				if a.xfadeGen != gen || !a.pill.shown {
+					a.pillMu.Unlock()
+					return
+				}
+				al := a.pillAlpha
+				a.pillMu.Unlock()
+				if al == 0 {
+					return
+				}
+				ov.PresentAlpha(frame.Img, x, y, uint8(al))
+				return
+			}
+			blended := blendImages(from, frame.Img, frac)
 			a.pillMu.Lock()
-			if a.xfadeGen != gen {
+			if a.xfadeGen != gen || !a.pill.shown {
 				a.pillMu.Unlock()
 				return
 			}
@@ -441,8 +473,8 @@ func (a *app) crossfadePill() {
 				return
 			}
 			ov.PresentAlpha(blended, x, y, uint8(al))
-		})
-	}
+		}
+	}()
 }
 
 // renderPillFrame renders the view and returns the frame plus the window position (the card's top-left

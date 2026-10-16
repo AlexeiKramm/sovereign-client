@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"testing"
+	"time"
 
 	"github.com/alexeikramm/sovereign-client/internal/core"
 	winplat "github.com/alexeikramm/sovereign-client/internal/windows"
@@ -141,5 +142,50 @@ func TestFadeTimings(t *testing.T) {
 	}
 	if crossfadeDuration <= 0 {
 		t.Fatal("crossfadeDuration must be positive")
+	}
+}
+
+// TestFadeOutCompletesToZero verifies that fadeOutPill animates monotonically down to zero and stays there.
+func TestFadeOutCompletesToZero(t *testing.T) {
+	a := &app{logf: func(string, ...any) {}}
+	a.pillAlpha = 255
+	a.pill = pillView{status: "Listening…", shown: false}
+
+	a.fadeOutPill()
+
+	// Wait for the animation plus margin.
+	time.Sleep(fadeOutDuration + 50*time.Millisecond)
+
+	a.pillMu.Lock()
+	alpha := a.pillAlpha
+	a.pillMu.Unlock()
+
+	if alpha != 0 {
+		t.Fatalf("expected alpha to settle at 0, got %d", alpha)
+	}
+}
+
+// TestFadeRapidInterruptionSettlesCleanly tests rapid interrupts between fading in and fading out,
+// ensuring the final fade-out wins and settles at alpha 0.
+func TestFadeRapidInterruptionSettlesCleanly(t *testing.T) {
+	a := &app{logf: func(string, ...any) {}}
+	a.pillAlpha = 0
+	a.pill = pillView{status: "Listening…", shown: true}
+
+	// Trigger a fade in, then rapidly trigger fade out after 30ms.
+	a.fadePillTo(255, fadeInDuration)
+	time.Sleep(30 * time.Millisecond)
+	a.pill.shown = false
+	a.fadeOutPill()
+
+	// Wait for fade-out to finish.
+	time.Sleep(fadeOutDuration + 60*time.Millisecond)
+
+	a.pillMu.Lock()
+	alpha := a.pillAlpha
+	a.pillMu.Unlock()
+
+	if alpha != 0 {
+		t.Fatalf("expected interrupted fade-out to settle cleanly at alpha 0, got %d", alpha)
 	}
 }
