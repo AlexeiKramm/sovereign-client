@@ -95,4 +95,5 @@ go build -ldflags "-s -w -H=windowsgui" -o sovereign-client.exe ./cmd/sovereign-
 
 ## License
 
-Apache-2.0 License. See the main [Sovereign repository](https://github.com/AlexeiKramm/sovereign) for full project details.
+Apache-2.0 License. See [LICENSE](LICENSE). The main
+[Sovereign repository](https://github.com/AlexeiKramm/sovereign) holds the Android app.
