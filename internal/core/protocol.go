@@ -1,9 +1,8 @@
 // Package core implements the frozen Sovereign phone <-> desktop wire protocol, v1.
 //
-// The authoritative spec is local-voice-ime's
-// docs/work/phone-server-desktop/PROTOCOL.md (v1, frozen 2026-10-06). This package is
-// machine-checked against the golden vectors vendored in testdata/protocol-vectors/, which
-// are a byte-for-byte copy of the Android repo's protocol-vectors/. The Android codec
+// The contract is frozen and pinned by the golden vectors vendored in
+// testdata/protocol-vectors/, a byte-for-byte copy of the Android repo's
+// fixtures/phone-server-desktop/protocol-vectors/. The Android codec
 // (server/ServerProtocol.kt) runs the same vectors, so the two implementations cannot drift.
 //
 // Scope: envelope + message catalogue + parse-time validation only. Transport (TLS,

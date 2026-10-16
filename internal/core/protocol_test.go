@@ -10,8 +10,8 @@ import (
 )
 
 // vectorsDir holds a byte-for-byte vendored copy of the Android repo's
-// docs/work/phone-server-desktop/protocol-vectors/ (PROTOCOL.md §11). Both repos run the
-// same vectors, so this is the cross-repo contract test.
+// fixtures/phone-server-desktop/protocol-vectors/. Both repos run the same vectors, so
+// this is the cross-repo contract test.
 const vectorsDir = "testdata/protocol-vectors"
 
 type manifestCase struct {
