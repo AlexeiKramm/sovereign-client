@@ -6,7 +6,9 @@ Your phone acts as your microphone and on-device AI compute engine (speech recog
 
 No cloud, no accounts, and no audio ever leaves your local Wi-Fi. Your PC does not need a microphone or AI-capable hardware.
 
-<!-- ASSET SLOT: Desktop Demo GIF / Screenshot (Floating pill & Control window) -->
+<p align="center">
+  <img src="assets/pill.gif" width="72%" alt="The desktop client's floating pill: Listening, then the green Inserted state reporting the word count" />
+</p>
 
 ---
 
@@ -57,6 +59,11 @@ flowchart LR
 ## Settings & Controls
 
 Left-click the tray icon to open the **Control Window**:
+
+<p align="center">
+  <img src="assets/control-window.png" width="46%" alt="The control window: connection status, the Dictations and Settings tabs, and the rolling dictation history with per-entry word counts" />
+</p>
+
 - **Dictation Mode:** Auto (tap or hold), Hold to talk, or Press to toggle.
 - **Set Custom Hotkey:** Rebind to your preferred keyboard combination.
 - **Insertion Method:** Fast clipboard paste (restores previous clipboard) or direct typing.
