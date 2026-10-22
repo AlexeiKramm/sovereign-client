@@ -82,6 +82,81 @@ func TestOverlayPresentAndHide(t *testing.T) {
 	}
 }
 
+// TestPanelClosesWhenAnotherAppTakesFocus drives the tray behaviour the control window depends on:
+// it is a real, focusable window, so "click away and it closes" arrives as WM_ACTIVATE(WA_INACTIVE),
+// not as a mouse or key event. It also pins the two exceptions — a deactivation caused by our own
+// windows (tray menu, pairing dialog) and a hide of our own must not close the panel — and that
+// HideAndWait is synchronous, because the dictation path relies on focus having left when it
+// captures its insertion target. Opt-in like the other window tests: SOVEREIGN_TEST_OVERLAY=1.
+func TestPanelClosesWhenAnotherAppTakesFocus(t *testing.T) {
+	if os.Getenv("SOVEREIGN_TEST_OVERLAY") == "" {
+		t.Skip("set SOVEREIGN_TEST_OVERLAY=1 to run the layered-window test")
+	}
+	orig := foregroundIsSelf
+	defer func() { foregroundIsSelf = orig }()
+
+	closed := make(chan struct{}, 4)
+	o, err := StartPanel(PanelOptions{
+		OnBlur: func() {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartPanel: %v", err)
+	}
+	defer o.Close()
+
+	img := image.NewRGBA(image.Rect(0, 0, 160, 100))
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 0xFF
+	}
+	o.Present(img, 50, 50)
+	time.Sleep(300 * time.Millisecond)
+
+	activate := func() {
+		// SendMessage, not PostMessage: the WndProc (and therefore OnClose) runs before this
+		// returns, so the assertions need no sleep.
+		procSendMessageTest.Call(o.hwnd, wmActivate, 0, 0) // WA_INACTIVE
+	}
+
+	// A foreground window of our own (the tray menu, the pairing fingerprint box) is not the user
+	// leaving the panel.
+	foregroundIsSelf = func() bool { return true }
+	activate()
+	select {
+	case <-closed:
+		t.Fatal("panel closed when one of the app's own windows took the foreground")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Another application took the foreground: the panel must close.
+	foregroundIsSelf = func() bool { return false }
+	activate()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("WM_ACTIVATE(WA_INACTIVE) did not close the panel")
+	}
+
+	// Hiding the window ourselves also deactivates it, but that is not the user clicking away.
+	if r, _, _ := procIsWindowVisibleTest.Call(o.hwnd); r != 0 {
+		o.Focus()
+		time.Sleep(100 * time.Millisecond)
+	}
+	o.HideAndWait()
+	if r, _, _ := procIsWindowVisibleTest.Call(o.hwnd); r != 0 {
+		t.Fatal("HideAndWait returned before the window was hidden")
+	}
+	select {
+	case <-closed:
+		t.Fatal("the panel's own hide was treated as a focus loss")
+	default:
+	}
+}
+
 // TestPanelInteracts drives the interactive window: it is created focusable, presents a frame,
 // reports it visible, and delivers posted mouse and key messages to the callbacks the controller
 // depends on (click-to-close, drag, Esc). Opt-in like the overlay test: SOVEREIGN_TEST_OVERLAY=1.

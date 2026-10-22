@@ -32,6 +32,7 @@ func (a *app) openPanel() {
 		return
 	}
 	a.panelMu.Lock()
+	a.resetPanelViewLocked()
 	a.panelContent.shown = true
 	ov := a.panelWin
 	a.panelMu.Unlock()
@@ -41,21 +42,65 @@ func (a *app) openPanel() {
 	}
 }
 
+// resetPanelViewLocked returns the panel to its opening state: the Dictations tab, scrolled to the
+// top, with no dropdown, press, copy or expansion left over from the previous visit. It is applied
+// both when the window closes and when it opens, so a visit can never inherit the previous one's
+// page. The screen position is separate: closePanel drops the dragged position too.
+func (a *app) resetPanelViewLocked() {
+	a.panelActiveTab = render.TabDictations
+	a.panelScroll = 0
+	a.accentDropdownOpen = false
+	a.panelCopiedID = ""
+	a.panelPressID = ""
+	a.panelPressedID = ""
+	a.panelPressing = false
+	a.panelDragging = false
+	a.panelExpanded = nil
+}
+
+// closePanelForDictation hides the control window before a dictation starts and waits for the hide
+// to land, so focus returns to whatever the user was in and the finished text has a live target.
+func (a *app) closePanelForDictation() {
+	a.panelMu.Lock()
+	shown := a.panelContent.shown
+	ov := a.panelWin
+	a.panelMu.Unlock()
+	if !shown || ov == nil {
+		return
+	}
+	a.closePanel()
+	ov.HideAndWait()
+}
+
 // closePanel hides the control window and abandons any in-flight hotkey capture; the tray keeps
-// running.
+// running. It is also the window's OnClose, so it runs on the panel's window thread when the user
+// clicks away — nothing here may block on that thread (Hide only posts).
 func (a *app) closePanel() {
 	a.cancelHotkeyCapture()
 	a.panelMu.Lock()
 	a.panelContent.shown = false
-	a.accentDropdownOpen = false
+	a.resetPanelViewLocked()
 	a.panelUserMoved = false
-	a.panelScroll = 0
-	a.panelExpanded = nil
 	ov := a.panelWin
 	a.panelMu.Unlock()
 	if ov != nil {
 		ov.Hide()
 	}
+}
+
+// onPanelBlur closes the panel when another application takes the foreground, which is what makes
+// it behave like a tray popup rather than a window that lingers. It runs on the panel's window
+// thread, so it must not block. While the panel is capturing a new hotkey it stays put: capturing a
+// Win+… chord opens the Start menu (and Win+Shift+S the snipping tool), and those focus changes are
+// part of the capture, not the user walking away. Esc, Alt+F4 and the close control still close it.
+func (a *app) onPanelBlur() {
+	a.mu.Lock()
+	capturing := a.hotkeyCapture
+	a.mu.Unlock()
+	if capturing {
+		return
+	}
+	a.closePanel()
 }
 
 // togglePanel opens the panel if hidden, closes it if shown.
@@ -89,6 +134,7 @@ func (a *app) ensurePanel() *winplat.Overlay {
 			OnMouse:         a.onPanelMouse,
 			OnKey:           a.onPanelKey,
 			OnClose:         a.closePanel,
+			OnBlur:          a.onPanelBlur,
 			OnDisplayChange: func() { go a.repaintPanel() },
 		})
 		if err != nil {
@@ -170,13 +216,9 @@ func (a *app) panelRows() []render.Row {
 	}
 
 	rows := []render.Row{
-		// 1. Voice Dictation
+		// 1. Voice Dictation. The trigger is always tap-or-hold (a tap toggles, a hold records
+		// while held), so there is no mode to choose.
 		{Kind: render.RowHeader, Text: "Voice Dictation", On: false},
-		{Kind: render.RowChips, Text: "Dictation mode", Options: []render.Option{
-			{ID: "mode:" + ModeAuto, Text: "Tap or hold", On: s.Mode == ModeAuto},
-			{ID: "mode:" + ModeHold, Text: "Hold to talk", On: s.Mode == ModeHold},
-			{ID: "mode:" + ModeToggle, Text: "Press to toggle", On: s.Mode == ModeToggle},
-		}},
 		{Kind: render.RowButton, ID: "hotkey:set", Text: "Set custom hotkey…", Detail: hotkey},
 
 		// 2. Text Output
@@ -591,8 +633,6 @@ func (a *app) panelAction(c render.Control) {
 		a.accentDropdownOpen = !a.accentDropdownOpen
 		a.panelMu.Unlock()
 		a.refreshPanel()
-	case strings.HasPrefix(c.ID, "mode:"):
-		a.setMode(strings.TrimPrefix(c.ID, "mode:"))
 	case strings.HasPrefix(c.ID, "insertion:"):
 		a.setInsertion(strings.TrimPrefix(c.ID, "insertion:"))
 	case strings.HasPrefix(c.ID, "separator:"):

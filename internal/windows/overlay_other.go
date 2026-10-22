@@ -38,6 +38,9 @@ func (o *Overlay) PresentAlpha(img *image.RGBA, x, y int, alpha uint8) {}
 // Hide is a no-op off Windows.
 func (o *Overlay) Hide() {}
 
+// HideAndWait is a no-op off Windows (it returns immediately).
+func (o *Overlay) HideAndWait() {}
+
 // Close is a no-op off Windows.
 func (o *Overlay) Close() error { return nil }
 

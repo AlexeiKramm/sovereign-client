@@ -25,6 +25,7 @@ var (
 	procGetCurrentThreadId         = kernel32.NewProc("GetCurrentThreadId")
 	procGetAsyncKeyState           = user32.NewProc("GetAsyncKeyState")
 	procGetForegroundWindow        = user32.NewProc("GetForegroundWindow")
+	procGetWindowThreadProcessId   = user32.NewProc("GetWindowThreadProcessId")
 	procSendInput                  = user32.NewProc("SendInput")
 	procOpenClipboard              = user32.NewProc("OpenClipboard")
 	procCloseClipboard             = user32.NewProc("CloseClipboard")

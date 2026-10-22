@@ -11,15 +11,6 @@ import (
 	"github.com/alexeikramm/sovereign-client/internal/core/iface"
 )
 
-// Dictation trigger modes.
-const (
-	// ModeAuto is the default: a tap toggles dictation on/off, a hold records until release — both
-	// on the same hotkey.
-	ModeAuto   = "auto"
-	ModeHold   = "hold"
-	ModeToggle = "toggle"
-)
-
 // Insertion methods for the finalized block.
 const (
 	// InsertPaste sets the clipboard and sends one Ctrl+V — fast and atomic for any length.
@@ -62,7 +53,6 @@ const (
 const DefaultThemePreset = "cyan"
 
 var (
-	dictationModes   = []string{ModeAuto, ModeHold, ModeToggle}
 	insertions       = []string{InsertPaste, InsertType}
 	separators       = []string{SepNone, SepSpace, SepNewline}
 	overlayPositions = []string{PosBottomRight, PosBottomLeft, PosTopRight, PosTopLeft}
@@ -72,8 +62,11 @@ var (
 
 // Settings is the tray app's user configuration, persisted as JSON beside the identity and
 // credentials. It holds no secret, so unlike Credentials it is written in the clear.
+//
+// Dictation is always tap-or-hold on the same hotkey (a short tap toggles, a longer hold records
+// while held), so there is no mode field: a "mode" key written by an older build is simply ignored
+// when the file is decoded.
 type Settings struct {
-	Mode                string `json:"mode"`
 	Hotkey              string `json:"hotkey"`
 	Insertion           string `json:"insertion"`
 	Separator           string `json:"separator"` // appended after each finalized utterance; SepNone/SepSpace/SepNewline
@@ -143,7 +136,6 @@ func (s *Settings) AddKnownAddr(addr string) {
 // DefaultSettings is the configuration used before the user changes anything.
 func DefaultSettings() Settings {
 	return Settings{
-		Mode:                ModeAuto,
 		Hotkey:              DefaultHotkey,
 		Insertion:           InsertPaste,
 		Separator:           SepSpace,
@@ -158,9 +150,6 @@ func DefaultSettings() Settings {
 // older or newer build can never put the app into an unrepresentable state. A hotkey that no longer
 // parses falls back to the default rather than leaving the user with dead input.
 func (s *Settings) Normalize() {
-	if !contains(dictationModes, s.Mode) {
-		s.Mode = ModeAuto
-	}
 	if !contains(insertions, s.Insertion) {
 		s.Insertion = InsertPaste
 	}

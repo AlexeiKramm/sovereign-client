@@ -660,8 +660,11 @@ func (a *app) scheduleTestStop() {
 }
 
 // captureTarget records the window that should receive the finished text. It is called just before
-// START_DICTATION, while the user's editor is still the foreground window.
+// START_DICTATION, while the user's editor is still the foreground window. The control window is
+// dismissed first: it is a real, focusable window, so a hotkey pressed while it holds focus would
+// otherwise record the panel itself as the target and the finished text would fail the focus check.
 func (a *app) captureTarget() {
+	a.closePanelForDictation()
 	t := winplat.ForegroundWindow()
 	a.mu.Lock()
 	a.target = t
@@ -743,38 +746,11 @@ func (a *app) phoneAvailability() core.ServerStatePayload {
 // normal tap is not mistaken for one.
 const tapWindow = 250 * time.Millisecond
 
-// hotkeyLoop dispatches the watcher's chord edges for the configured mode. It runs for the lifetime
-// of one armed watcher; a mode or chord change disarms and re-arms (see rearmHotkey).
-func (a *app) hotkeyLoop(w *winplat.HotkeyWatcher, mode string, reset <-chan struct{}) {
-	switch mode {
-	case ModeToggle:
-		for ev := range w.Events() {
-			if ev == iface.Press { // RegisterHotKey reports Press only
-				a.toggleDictation()
-			}
-		}
-	case ModeHold:
-		for ev := range w.Events() {
-			switch ev {
-			case iface.Press:
-				if !a.isDictating() {
-					a.startDictation()
-				}
-			case iface.Release:
-				if a.isDictating() || a.isPending() {
-					a.stopDictation()
-				}
-			}
-		}
-	default: // ModeAuto
-		a.smartHotkeyLoop(w, reset)
-	}
-}
-
-// smartHotkeyLoop implements tap-to-toggle + hold-to-talk on one hotkey: dictation starts on the
-// press either way, and the tap window only decides whether the release stops it. The timer lives
-// here so the SmartMode machine is driven from a single goroutine. reset arrives when the session
-// ended for a reason the machine did not initiate, so it can return to idle.
+// smartHotkeyLoop implements tap-to-toggle + hold-to-talk on one hotkey — the only dictation
+// behaviour there is: dictation starts on the press either way, and the tap window only decides
+// whether the release stops it. The timer lives here so the SmartMode machine is driven from a
+// single goroutine. reset arrives when the session ended for a reason the machine did not initiate,
+// so it can return to idle.
 func (a *app) smartHotkeyLoop(w *winplat.HotkeyWatcher, reset <-chan struct{}) {
 	sm := &SmartMode{}
 	var timer *time.Timer
@@ -826,14 +802,6 @@ func (a *app) applyAction(act Action) {
 		a.startDictation()
 	case ActionStop:
 		a.stopDictation()
-	}
-}
-
-func (a *app) toggleDictation() {
-	if a.isDictating() {
-		a.stopDictation()
-	} else {
-		a.startDictation()
 	}
 }
 
@@ -906,13 +874,6 @@ func (a *app) stopDictation() {
 	}
 }
 
-// isPending reports whether a hotkey dictation is waiting for a link.
-func (a *app) isPending() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.pending
-}
-
 // inject writes the finished block with the configured method, falling back to the other method so
 // text is never dropped silently. Focus is verified before anything is written. Paste is the default
 // because it is fast and atomic for any length; typing leaves the clipboard untouched (D-120 amended
@@ -957,7 +918,8 @@ func (a *app) insert(method string, target uintptr, text string) error {
 	return winplat.PasteText(text)
 }
 
-// armHotkey starts the global hotkey watcher for the configured chord and mode. It is idempotent.
+// armHotkey starts the global hotkey watcher for the configured chord. It is idempotent. The
+// watcher uses the keyboard hook (not RegisterHotKey) because tap-or-hold needs key-up events.
 func (a *app) armHotkey() {
 	a.mu.Lock()
 	if a.armed {
@@ -966,14 +928,13 @@ func (a *app) armHotkey() {
 	}
 	spec := a.settings.Hotkey
 	chord, err := iface.ParseHotkey(spec)
-	mode := a.settings.Mode
 	a.mu.Unlock()
 	if err != nil {
 		a.logf("hotkey %q is invalid: %v", spec, err)
 		return
 	}
 
-	w, err := winplat.StartHotkey(chord, mode == ModeToggle)
+	w, err := winplat.StartHotkey(chord, false)
 	if err != nil {
 		a.logf("hotkey unavailable: %v", err)
 		// Report the failure without re-entering armHotkey through setState: hotkeysLive is always
@@ -988,8 +949,8 @@ func (a *app) armHotkey() {
 	a.armed = true
 	a.smartReset = reset
 	a.mu.Unlock()
-	a.logf("hotkey armed: %s (mode=%s)", chord, mode)
-	go a.hotkeyLoop(w, mode, reset)
+	a.logf("hotkey armed: %s", chord)
+	go a.smartHotkeyLoop(w, reset)
 }
 
 func (a *app) disarmHotkey() {
@@ -1104,17 +1065,6 @@ func (a *app) doUnpair() {
 	a.setState(StateOffline, "not paired")
 	a.refreshPanel()
 	a.logf("unpaired; credentials deleted")
-}
-
-func (a *app) setMode(m string) {
-	a.mu.Lock()
-	a.settings.Mode = m
-	s := a.settings
-	a.mu.Unlock()
-	a.refreshPanel()
-	a.rearmHotkey()
-	// Persist last: the disk write must not sit between the click and the visible change.
-	a.persist(s)
 }
 
 // applyHotkey stores a hotkey (from the panel's capture) and re-arms the watcher.

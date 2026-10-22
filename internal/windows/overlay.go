@@ -41,6 +41,10 @@ type PanelOptions struct {
 	// OnClose is called when the user asks to close the window (the system close gesture). The
 	// controller decides whether to hide or destroy it.
 	OnClose func()
+	// OnBlur is called when another application takes the foreground, so a tray popup can dismiss
+	// itself. It runs on the window thread and must not block. If it is nil, OnClose is not used as
+	// a stand-in: a focus loss is not the same request as the close gesture.
+	OnBlur func()
 	// OnDisplayChange is called when the display or DPI changes.
 	OnDisplayChange func()
 }

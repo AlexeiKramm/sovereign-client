@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,7 +20,6 @@ func TestLoadSettingsMissingFileYieldsDefaults(t *testing.T) {
 func TestSettingsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	want := Settings{
-		Mode:                ModeToggle,
 		Hotkey:              "F9",
 		Insertion:           InsertType,
 		Separator:           SepNewline,
@@ -126,8 +126,34 @@ func TestSaveSettingsDefaultsInsertion(t *testing.T) {
 	if got.Insertion != InsertPaste {
 		t.Fatalf("unknown insertion not defaulted: %q", got.Insertion)
 	}
-	if got.Mode != ModeAuto {
-		t.Fatalf("default mode = %q, want %q", got.Mode, ModeAuto)
+}
+
+// TestLegacyModeKeyIsIgnored pins the retirement of the dictation-mode setting: a settings file
+// written by an older build still decodes, and its "mode" value has no effect (the trigger is
+// always tap-or-hold now).
+func TestLegacyModeKeyIsIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"mode":"toggle","hotkey":"F9"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadSettings(path)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if got.Hotkey != "F9" {
+		t.Fatalf("hotkey = %q, want F9 (the rest of the file must still load)", got.Hotkey)
+	}
+
+	// And saving must drop the retired key rather than preserving it.
+	if err := SaveSettings(path, got); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"mode"`) {
+		t.Fatalf("saved settings still carry a mode key: %s", b)
 	}
 }
 

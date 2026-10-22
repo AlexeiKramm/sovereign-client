@@ -42,6 +42,7 @@ type Overlay struct {
 	onMouse         func(MouseEvent)
 	onKey           func(vk uint32) bool
 	onClose         func()
+	onBlur          func()
 
 	mu      sync.Mutex
 	pending *overlayFrame
@@ -57,6 +58,15 @@ type Overlay struct {
 	dibBits   unsafe.Pointer
 	dibW      int
 	dibH      int
+
+	// selfHide is set (on the window thread) while the window hides itself. Hiding the active
+	// window makes Windows deliver WM_ACTIVATE(WA_INACTIVE) synchronously, which must not be
+	// mistaken for the user switching to another application.
+	selfHide bool
+	// shownOnce is set once the interactive window has been shown, so later frames use
+	// SW_SHOWNA: a repaint (live text, status, a new history card) must not take focus back from
+	// the app the user is in, or from one of our own dialogs.
+	shownOnce bool
 }
 
 // overlayFrame is one marshalled Present/Hide request.
@@ -65,6 +75,7 @@ type overlayFrame struct {
 	x, y  int
 	alpha uint8 // SourceConstantAlpha for the whole frame (255 = opaque); the pill's fade uses it
 	hide  bool
+	done  chan struct{} // closed by the window thread once the frame is applied (HideAndWait)
 }
 
 // StartOverlay creates the hidden pill window. onDisplayChange, if set, is called (on the window
@@ -87,6 +98,7 @@ func StartPanel(opts PanelOptions) (*Overlay, error) {
 		onMouse:         opts.OnMouse,
 		onKey:           opts.OnKey,
 		onClose:         opts.OnClose,
+		onBlur:          opts.OnBlur,
 	})
 }
 
@@ -161,6 +173,25 @@ func (o *Overlay) Hide() {
 	o.pending = &overlayFrame{hide: true}
 	o.mu.Unlock()
 	o.wake()
+}
+
+// HideAndWait hides the window and returns once the window thread has done it, so the caller can
+// rely on focus having left: Windows hands activation to another window when the active window is
+// hidden. It must not be called from the window thread itself (that would deadlock).
+func (o *Overlay) HideAndWait() {
+	done := make(chan struct{})
+	o.mu.Lock()
+	if o.closed || o.hwnd == 0 {
+		o.mu.Unlock()
+		return
+	}
+	o.pending = &overlayFrame{hide: true, done: done}
+	o.mu.Unlock()
+	o.wake()
+	select {
+	case <-done:
+	case <-o.done: // the window died first; nothing left to wait for
+	}
 }
 
 // Handle returns the window handle, for monitor/work-area queries.
@@ -350,6 +381,14 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 		if o.interactive && o.onKey != nil && o.onKey(uint32(wparam)) {
 			return 0
 		}
+	case wmActivate:
+		// WA_INACTIVE (the low word of wParam is 0): the user moved to another application, so the
+		// panel closes the way a tray popup should. A hide of our own (see apply) and a foreground
+		// window of our own (the tray menu, the pairing or unpair dialog) are not the user leaving.
+		if o.interactive && o.onBlur != nil && uint32(wparam)&0xffff == 0 && !o.selfHide && !foregroundIsSelf() {
+			o.onBlur()
+		}
+		return 0
 	case wmClose:
 		// The system close gesture (Alt+F4, the system menu). Let the controller decide; do NOT
 		// destroy here, because Close() must be able to tear the window down deterministically.
@@ -367,6 +406,20 @@ func (o *Overlay) wndProc(hwnd, message, wparam, lparam uintptr) uintptr {
 	}
 	r, _, _ := procDefWindowProc.Call(hwnd, message, wparam, lparam)
 	return r
+}
+
+// foregroundIsSelf reports whether the window that holds the foreground belongs to this process.
+// The tray's menu, the pairing fingerprint box and the Unpair confirmation are all ours: they open
+// over the panel without the user leaving it, so they must not dismiss it. It is a variable so the
+// window test can drive both branches deterministically.
+var foregroundIsSelf = func() bool {
+	fg, _, _ := procGetForegroundWindow.Call()
+	if fg == 0 {
+		return false
+	}
+	var pid uint32
+	procGetWindowThreadProcessId.Call(fg, uintptr(unsafe.Pointer(&pid)))
+	return pid != 0 && pid == windows.GetCurrentProcessId()
 }
 
 func mouseKind(message uint32) MouseKind {
@@ -389,7 +442,13 @@ func (o *Overlay) apply() {
 		return
 	}
 	if fr.hide {
+		o.selfHide = true
 		procShowWindow.Call(o.hwnd, swHide)
+		o.selfHide = false
+		o.shownOnce = false // the next show is an open again, and may take focus
+		if fr.done != nil {
+			close(fr.done)
+		}
 		return
 	}
 	if err := o.upload(fr.img, fr.x, fr.y, fr.alpha); err != nil {
@@ -405,8 +464,15 @@ func (o *Overlay) apply() {
 	o.mu.Unlock()
 	if o.interactive {
 		// The panel is a normal focusable window: show it activated, do not force it topmost (the
-		// user can cover it, and Focus brings it forward when it is opened).
+		// user can cover it, and Focus brings it forward when it is opened). Once it is up, a
+		// repaint shows it without activating, so live text arriving cannot pull focus out of the
+		// editor — or out of a pairing dialog that has just opened over the panel.
+		if o.shownOnce {
+			procShowWindow.Call(o.hwnd, swShowNoActivate)
+			return
+		}
 		procShowWindow.Call(o.hwnd, swShow)
+		o.shownOnce = true
 		return
 	}
 	procShowWindow.Call(o.hwnd, swShowNoActivate)
@@ -585,6 +651,7 @@ const (
 	biRGB = 0
 
 	wmDestroy       = 0x0002
+	wmActivate      = 0x0006
 	wmClose         = 0x0010
 	wmMouseMove     = 0x0200
 	wmLButtonDown   = 0x0201

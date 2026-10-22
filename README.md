@@ -28,10 +28,10 @@ flowchart LR
 ## Features
 
 - **Global Hotkey:** Press `Ctrl+Alt+Space` (customizable) to dictate into any window (Word, browser, code editors, chat).
-- **Smart Dictation Modes:** Supports tap-to-toggle, hold-to-talk, and automatic detection (short tap toggles; hold records while held).
+- **Tap or Hold to Dictate:** One hotkey does both — a short tap toggles dictation on and off, holding records only while held.
 - **Floating Pill Overlay:** Unobtrusive click-through overlay showing live settled text in white and in-progress speech in gray.
 - **Clean Insertion:** Inserts text instantly at your cursor (paste-insert with clipboard restoration, or synthetic typing fallback).
-- **Control Window:** Left-click the tray icon to view live dictation history, processing latency, connection status, and settings.
+- **Control Window:** Left-click the tray icon to view live dictation history, processing latency, connection status, and settings. It always opens on the history page and closes by itself when you click into another app.
 - **Private & Direct:** Connects directly to your phone over local Wi-Fi with encrypted WebSockets (`wss://`) and mutual fingerprint pairing.
 
 ---
@@ -64,8 +64,7 @@ Left-click the tray icon to open the **Control Window**:
   <img src="assets/control-window.png" width="46%" alt="The control window: connection status, the Dictations and Settings tabs, and the rolling dictation history with per-entry word counts" />
 </p>
 
-- **Dictation Mode:** Auto (tap or hold), Hold to talk, or Press to toggle.
-- **Set Custom Hotkey:** Rebind to your preferred keyboard combination.
+- **Set Custom Hotkey:** Rebind to your preferred keyboard combination. Dictation itself is always tap-or-hold.
 - **Insertion Method:** Fast clipboard paste (restores previous clipboard) or direct typing.
 - **After Each Utterance:** Automatically append a space, newline, or nothing.
 - **Overlay Position:** Bottom Right, Bottom Left, Top Right, or Top Left.

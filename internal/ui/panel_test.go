@@ -2,6 +2,7 @@ package ui
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alexeikramm/sovereign-client/internal/core"
@@ -44,12 +45,13 @@ func TestPanelRowsReflectSettings(t *testing.T) {
 	a.paired = false
 
 	rows := a.panelRows()
-	mode := rowByText(rows, "Dictation mode")
-	if mode == nil {
-		t.Fatal("no Dictation mode row")
+	// The dictation-mode chips are gone: tap-or-hold is the only behaviour, so there is nothing to
+	// choose. The "Voice Dictation" header stays, because the hotkey button lives under it.
+	if rowByText(rows, "Dictation mode") != nil {
+		t.Fatal("Dictation mode row still present; the trigger is no longer a setting")
 	}
-	if !optionOn(mode, "mode:"+ModeAuto) || optionOn(mode, "mode:"+ModeHold) {
-		t.Fatalf("mode chips = %+v", mode.Options)
+	if r, ok := rowByID(rows, "hotkey:set"); !ok || r.Text != "Set custom hotkey…" {
+		t.Fatalf("hotkey row = %+v, want the custom-hotkey button", r)
 	}
 	if _, ok := rowByID(rows, "pair"); !ok {
 		t.Fatal("expected a pair button when unpaired")
@@ -89,10 +91,6 @@ func TestPanelActionUpdatesSettings(t *testing.T) {
 	a.opts.SettingsPath = filepath.Join(t.TempDir(), "settings.json")
 	a.settings = DefaultSettings()
 
-	a.panelAction(render.Control{Kind: render.ControlChip, ID: "mode:" + ModeHold})
-	if a.settings.Mode != ModeHold {
-		t.Fatalf("mode = %q, want %q", a.settings.Mode, ModeHold)
-	}
 	a.panelAction(render.Control{Kind: render.ControlChip, ID: "insertion:" + InsertType})
 	if a.settings.Insertion != InsertType {
 		t.Fatalf("insertion = %q, want %q", a.settings.Insertion, InsertType)
@@ -148,6 +146,55 @@ func TestPanelActionUpdatesSettings(t *testing.T) {
 	a.panelAction(render.Control{Kind: render.ControlClose})
 	if a.panelContent.shown {
 		t.Fatal("close control did not close the panel")
+	}
+}
+
+// TestPanelOpensOnDictationsTab pins that the panel has no memory of its last visit: whichever tab
+// it was left on, the next open starts on the Dictations page, scrolled to the top, with no
+// dropdown or card state carried over.
+func TestPanelOpensOnDictationsTab(t *testing.T) {
+	a := &app{}
+	a.panelActiveTab = render.TabSettings
+	a.panelScroll = 240
+	a.accentDropdownOpen = true
+	a.panelExpanded = map[string]bool{"abc": true}
+	a.panelCopiedID = "abc"
+
+	a.resetPanelViewLocked()
+
+	if a.panelActiveTab != render.TabDictations {
+		t.Fatalf("active tab = %d, want TabDictations", a.panelActiveTab)
+	}
+	if a.panelScroll != 0 {
+		t.Fatalf("scroll = %d, want 0", a.panelScroll)
+	}
+	if a.accentDropdownOpen {
+		t.Fatal("accent dropdown left open across an open")
+	}
+	if len(a.panelExpanded) != 0 {
+		t.Fatalf("expanded cards = %v, want none", a.panelExpanded)
+	}
+	if a.panelCopiedID != "" {
+		t.Fatalf("copied highlight = %q, want none", a.panelCopiedID)
+	}
+}
+
+// TestPanelBlurClosesButNotWhileCapturing pins the tray-popup contract: losing the foreground closes
+// the panel, except while it is capturing a new hotkey (a Win+… chord opens the Start menu, which is
+// part of the capture, not the user walking away).
+func TestPanelBlurClosesButNotWhileCapturing(t *testing.T) {
+	a := &app{}
+	a.panelContent.shown = true
+	a.onPanelBlur()
+	if a.panelContent.shown {
+		t.Fatal("focus loss did not close the panel")
+	}
+
+	a.panelContent.shown = true
+	a.hotkeyCapture = true
+	a.onPanelBlur()
+	if !a.panelContent.shown {
+		t.Fatal("focus loss aborted an in-flight hotkey capture")
 	}
 }
 
@@ -215,13 +262,26 @@ func rowByText(rows []render.Row, text string) *render.Row {
 	return nil
 }
 
-func optionOn(r *render.Row, id string) bool {
-	for _, o := range r.Options {
-		if o.ID == id {
-			return o.On
+// TestNoDictationModeSetting pins that the trigger is not configurable any more: the settings rows
+// carry no chip that would reintroduce a mode choice, and a stale "mode:*" click from an older
+// control window is inert.
+func TestNoDictationModeSetting(t *testing.T) {
+	a := &app{}
+	a.opts.SettingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.settings = DefaultSettings()
+	before := a.settings
+
+	a.panelAction(render.Control{Kind: render.ControlChip, ID: "mode:hold"})
+	if a.settings != before {
+		t.Fatalf("a mode chip changed the settings: %+v, want %+v", a.settings, before)
+	}
+	for _, r := range a.panelRows() {
+		for _, o := range r.Options {
+			if strings.HasPrefix(o.ID, "mode:") {
+				t.Fatalf("settings row %q still offers a dictation-mode chip %q", r.Text, o.ID)
+			}
 		}
 	}
-	return false
 }
 
 // TestAvailabilityText pins the wording the control window shows for the phone's advertised
